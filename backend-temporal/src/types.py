@@ -3,6 +3,18 @@
 from pydantic import BaseModel
 
 
+# -- Workflow input --
+
+
+class WorkflowState(BaseModel):
+    """Workflow input and continue-as-new state."""
+    working_dir: str
+    messages: list[dict] = []
+    event_list: list[dict] = []
+    response_id: str | None = None
+    db_schema: str | None = None
+
+
 # -- Workflow signals --
 
 

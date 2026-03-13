@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
-    from .database import load_schema
     from .types import (
         ActivityEventsInput,
         ModelCallInput,
@@ -20,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
         StartTurnInput,
         ToolInput,
         ToolResult,
+        WorkflowState,
     )
 
 logger = workflow.logger
@@ -114,14 +116,15 @@ TOOL_DEFINITIONS: list[dict] = [
 class AnalyticsWorkflow:
 
     @workflow.init
-    def __init__(self, working_dir: str) -> None:
-        self._messages: list[dict] = []
-        self._event_list: list[dict] = []
+    def __init__(self, state: WorkflowState) -> None:
+        self._messages: list[dict] = state.messages
+        self._event_list: list[dict] = state.event_list
         self._pending_message: str | None = None
         self._turn_complete: bool = True
         self._interrupted: bool = False
-        self._response_id: str | None = None
-        self._working_dir: str = working_dir
+        self._response_id: str | None = state.response_id
+        self._working_dir: str = state.working_dir
+        self._schema: str | None = state.db_schema
 
     # -- helpers --
 
@@ -134,9 +137,8 @@ class AnalyticsWorkflow:
         self._event_list.append(event)
 
     def _build_system_prompt(self) -> str:
-        schema = load_schema()
         session_id = workflow.info().workflow_id
-        return SYSTEM_PROMPT_TEMPLATE.format(schema=schema).replace(
+        return SYSTEM_PROMPT_TEMPLATE.format(schema=self._schema).replace(
             "SESSION_ID", session_id
         )
 
@@ -185,7 +187,16 @@ class AnalyticsWorkflow:
     # -- main loop --
 
     @workflow.run
-    async def run(self, working_dir: str) -> None:
+    async def run(self, state: WorkflowState) -> None:
+        # Load schema via activity on first run (or after continue-as-new
+        # if it wasn't carried forward)
+        if self._schema is None:
+            self._schema = await workflow.execute_activity(
+                "load_schema",
+                start_to_close_timeout=timedelta(seconds=10),
+                result_type=str,
+            )
+
         while True:
             await workflow.wait_condition(
                 lambda: self._pending_message is not None
@@ -198,6 +209,15 @@ class AnalyticsWorkflow:
             await self._run_turn(message)
 
             self._turn_complete = True
+
+            if workflow.info().is_continue_as_new_suggested():
+                workflow.continue_as_new(args=[WorkflowState(
+                    working_dir=self._working_dir,
+                    messages=self._messages,
+                    event_list=self._event_list,
+                    response_id=self._response_id,
+                    db_schema=self._schema,
+                )])
 
     async def _run_turn(self, message: str) -> None:
         self._messages.append({
@@ -239,14 +259,31 @@ class AnalyticsWorkflow:
                     operation_id=operation_id,
                 )
 
-            model_result: ModelCallResult = await workflow.execute_activity(
-                "model_call",
-                call_input,
-                start_to_close_timeout=timedelta(seconds=180),
-                retry_policy=retry_policy,
-                heartbeat_timeout=timedelta(seconds=30),
-                result_type=ModelCallResult,
+            model_task = asyncio.create_task(
+                workflow.execute_activity(
+                    "model_call",
+                    call_input,
+                    start_to_close_timeout=timedelta(seconds=180),
+                    retry_policy=retry_policy,
+                    heartbeat_timeout=timedelta(seconds=30),
+                    result_type=ModelCallResult,
+                )
             )
+
+            # Wait for either completion or interrupt
+            await workflow.wait_condition(
+                lambda: model_task.done() or self._interrupted
+            )
+
+            if self._interrupted and not model_task.done():
+                model_task.cancel()
+                try:
+                    await model_task
+                except (asyncio.CancelledError, ActivityError):
+                    pass
+                break
+
+            model_result: ModelCallResult = model_task.result()
 
             self._response_id = model_result.response_id
 
@@ -280,6 +317,7 @@ class AnalyticsWorkflow:
                         operation_id=str(workflow.uuid4()),
                     ),
                     start_to_close_timeout=timedelta(seconds=60),
+                    heartbeat_timeout=timedelta(seconds=45),
                     retry_policy=retry_policy,
                     result_type=ToolResult,
                 )

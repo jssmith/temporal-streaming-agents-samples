@@ -19,14 +19,15 @@ Chat-based analytics agent that queries a Chinook music store database (SQLite).
 # Download the Chinook SQLite database
 ./setup.sh
 
-# Install backend dependencies
-(cd backend-ephemeral && uv sync)
-
 # Install frontend dependencies
 (cd frontend && npm install)
+
+# Install backend dependencies (pick one or both)
+(cd backend-ephemeral && uv sync)
+(cd backend-temporal && uv sync)
 ```
 
-### Running
+### Running (Ephemeral Backend)
 
 ```bash
 # Terminal 1: Backend (port 8001)
@@ -40,6 +41,32 @@ npm run dev
 ```
 
 Open http://localhost:3001
+
+### Running (Temporal Backend)
+
+Same agent, same frontend, but backed by Temporal for durable execution. Sessions survive proxy restarts.
+
+```bash
+# Terminal 1: Temporal dev server
+temporal server start-dev
+
+# Terminal 2: Worker
+source ~/api_keys.sh  # or: export OPENAI_API_KEY=sk-...
+cd backend-temporal
+uv run python -m src.worker
+
+# Terminal 3: FastAPI proxy (port 8001)
+cd backend-temporal
+uv run uvicorn src.main:app --reload --port 8001
+
+# Terminal 4: Frontend (port 3001)
+cd frontend
+npm run dev
+```
+
+Open http://localhost:3001
+
+Additional prerequisite: [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal` on macOS).
 
 ### Demo Script
 

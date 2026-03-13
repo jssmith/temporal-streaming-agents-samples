@@ -4,15 +4,15 @@ import asyncio
 import json
 import logging
 import os
-import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import openai
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
-from .database import get_connection, get_db_path
+from .database import get_connection, get_db_path, load_schema as _load_schema
 from .event_batcher import EventBatcher
 from .types import (
     ModelCallInput,
@@ -28,62 +28,16 @@ FORBIDDEN_PREFIXES = ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE")
 ROW_LIMIT = 500
 TIMEOUT_SECONDS = 30
 
-TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "name": "execute_sql",
-        "description": "Run a read-only SQL query against the Chinook SQLite database. Returns rows as a list of objects.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The SQL query to execute",
-                }
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "execute_python",
-        "description": "Run Python code in a subprocess. pandas, matplotlib, sqlite3, json, math, statistics, collections, itertools are available. DB_PATH env var points to the SQLite file. Save matplotlib figures to files in the current directory. Print output to stdout.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "The Python code to execute",
-                }
-            },
-            "required": ["code"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "bash",
-        "description": "Run a shell command. DB_PATH env var is available. Working directory is the session directory.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute",
-                }
-            },
-            "required": ["command"],
-        },
-    },
-]
-
 
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
 
 
-async def _execute_sql(query: str) -> dict:
-    """Execute a read-only SQL query against the Chinook database."""
+def _execute_sql_sync(query: str) -> dict:
+    """Execute a read-only SQL query against the Chinook database (sync)."""
+    import sqlite3
+
     stripped = query.strip().upper()
     for prefix in FORBIDDEN_PREFIXES:
         if stripped.startswith(prefix):
@@ -102,6 +56,11 @@ async def _execute_sql(query: str) -> dict:
         return {"error": str(e)}
     finally:
         conn.close()
+
+
+async def _execute_sql(query: str) -> dict:
+    """Execute a read-only SQL query without blocking the event loop."""
+    return await asyncio.to_thread(_execute_sql_sync, query)
 
 
 async def _execute_python(code: str, working_dir: Path) -> dict:
@@ -203,6 +162,12 @@ async def _get_batcher(signal_name: str = "receive_events", interval: float = 2.
 
 
 @activity.defn
+async def load_schema() -> str:
+    """Load the database schema. Runs as an activity to keep I/O out of workflows."""
+    return await asyncio.to_thread(_load_schema)
+
+
+@activity.defn
 async def model_call(input: ModelCallInput) -> ModelCallResult:
     """Stream a model call via the OpenAI Responses API.
 
@@ -223,7 +188,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
         ))
         await batcher.flush()
 
-    client = openai.AsyncOpenAI()
+    client = openai.AsyncOpenAI(max_retries=0)
 
     kwargs: dict = {
         "model": input.model,
@@ -264,9 +229,10 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                         thinking_buffer = ""
                         thinking_active = False
 
-                # Text output — buffer, classify after stream
+                # Text output — stream incrementally
                 elif event_type == "response.output_text.delta":
                     text_buffer += event.delta
+                    batcher.add(_make_event("TEXT_DELTA", delta=event.delta))
 
                 # Function call argument streaming
                 elif event_type == "response.function_call_arguments.delta":
@@ -302,32 +268,52 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     async def timer_flush():
         await batcher.run_flusher()
 
-    # Run both tasks concurrently, cancel timer when stream completes
-    completed, pending = await asyncio.wait(
-        [asyncio.create_task(read_stream()), asyncio.create_task(timer_flush())],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-    # Re-raise any exceptions from the stream task
-    for t in completed:
-        t.result()
+    try:
+        # Run both tasks concurrently, cancel timer when stream completes
+        completed, pending = await asyncio.wait(
+            [asyncio.create_task(read_stream()), asyncio.create_task(timer_flush())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+        # Re-raise any exceptions from the stream task
+        for t in completed:
+            t.result()
+
+    except openai.AuthenticationError as e:
+        raise ApplicationError(
+            f"Invalid API key: {e}",
+            type="AuthenticationError",
+            non_retryable=True,
+        )
+    except openai.RateLimitError as e:
+        raise ApplicationError(
+            f"Rate limited: {e}",
+            type="RateLimitError",
+        )
+    except openai.APIStatusError as e:
+        if e.status_code >= 500:
+            raise ApplicationError(
+                f"OpenAI server error ({e.status_code}): {e}",
+                type="ServerError",
+            )
+        raise ApplicationError(
+            f"OpenAI client error ({e.status_code}): {e}",
+            type="ClientError",
+            non_retryable=True,
+        )
+    except openai.APIConnectionError as e:
+        raise ApplicationError(
+            f"Connection error: {e}",
+            type="ConnectionError",
+        )
 
     # Close thinking if still open
     if thinking_active:
         batcher.add(_make_event("THINKING_COMPLETE", content=thinking_buffer))
 
-    # Classify buffered text
-    if tool_calls and text_buffer:
-        # Text before tool calls = planning/explanation -> emit as thinking
-        batcher.add(_make_event("THINKING_START"))
-        batcher.add(_make_event("THINKING_DELTA", delta=text_buffer))
-        batcher.add(_make_event("THINKING_COMPLETE", content=text_buffer))
-        text_buffer = ""
-
-    if not tool_calls and text_buffer:
-        # Final answer text
-        batcher.add(_make_event("TEXT_DELTA", delta=text_buffer))
+    # Text was streamed incrementally as TEXT_DELTA. Emit completion.
+    if text_buffer:
         batcher.add(_make_event("TEXT_COMPLETE", text=text_buffer))
 
     # Final flush
@@ -374,6 +360,7 @@ async def execute_tool(input: ToolInput) -> ToolResult:
         await batcher.flush()
 
     working_dir = Path(input.working_dir)
+    activity.heartbeat("executing")
     result = await _run_tool(input.tool_name, input.arguments, working_dir)
 
     return ToolResult(

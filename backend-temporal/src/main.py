@@ -3,6 +3,7 @@
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,26 +11,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.contrib.pydantic import pydantic_data_converter
 
 from .types import (
     PollEventsInput,
     SessionInfo,
     StartTurnInput,
+    WorkflowState,
 )
 from .workflows import AnalyticsWorkflow
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-app = FastAPI(title="Analytics Agent (Temporal)")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3001"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 TASK_QUEUE = "analytics-agent"
 SESSIONS_DIR = Path(__file__).parent.parent.parent / "sessions"
@@ -40,14 +33,29 @@ _client: Client | None = None
 async def get_client() -> Client:
     global _client
     if _client is None:
-        _client = await Client.connect("localhost:7233")
+        _client = await Client.connect(
+            "localhost:7233",
+            data_converter=pydantic_data_converter,
+        )
     return _client
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     await get_client()
     logger.info("Analytics agent Temporal backend started")
+    yield
+
+
+app = FastAPI(title="Analytics Agent (Temporal)", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +102,7 @@ async def create_session():
 
     await client.start_workflow(
         AnalyticsWorkflow.run,
-        str(working_dir),
+        WorkflowState(working_dir=str(working_dir)),
         id=session_id,
         task_queue=TASK_QUEUE,
     )
