@@ -68,6 +68,7 @@ async def run_agent_turn(
     """
     client = openai.AsyncOpenAI()
 
+    yield SSEEvent.user_message(message)
     yield SSEEvent.agent_start()
 
     system_prompt = _build_system_prompt(session.session_id)

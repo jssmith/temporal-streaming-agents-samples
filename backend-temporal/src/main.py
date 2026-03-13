@@ -85,6 +85,8 @@ class SessionSummary(BaseModel):
 
 class SessionMessages(BaseModel):
     messages: list[dict]
+    events: list[dict]
+    turn_in_progress: bool = False
 
 
 class RunRequest(BaseModel):
@@ -146,7 +148,11 @@ async def get_session(session_id: str):
         info: SessionInfo = await handle.query(AnalyticsWorkflow.get_session)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
-    return SessionMessages(messages=info.messages)
+    return SessionMessages(
+        messages=info.messages,
+        events=info.events,
+        turn_in_progress=info.turn_in_progress,
+    )
 
 
 @app.post("/api/sessions/{session_id}/run")
@@ -208,6 +214,18 @@ async def run_session(session_id: str, request: RunRequest):
     )
 
 
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Signal the workflow to exit gracefully."""
+    client = await get_client()
+    handle = client.get_workflow_handle(session_id)
+    try:
+        await handle.signal(AnalyticsWorkflow.close_session)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted"}
+
+
 @app.post("/api/sessions/{session_id}/interrupt")
 async def interrupt_session(session_id: str):
     client = await get_client()
@@ -219,27 +237,46 @@ async def interrupt_session(session_id: str):
     return {"status": "interrupted"}
 
 
-@app.get("/api/events/{session_id}")
-async def get_events(session_id: str, from_index: int = 0):
+@app.get("/api/sessions/{session_id}/stream")
+async def stream_events(session_id: str, from_index: int = 0):
+    """Resume streaming events for an in-progress turn."""
     client = await get_client()
     handle = client.get_workflow_handle(session_id)
 
-    try:
-        result = await handle.execute_update(
-            AnalyticsWorkflow.poll_events,
-            PollEventsInput(last_seen_index=from_index),
-        )
-    except Exception:
-        raise HTTPException(status_code=404, detail="Session not found")
-
     async def event_stream():
-        for event in result.events:
-            yield f"data: {json.dumps(event)}\n\n"
+        last_index = from_index
+
+        while True:
+            try:
+                result = await handle.execute_update(
+                    AnalyticsWorkflow.poll_events,
+                    PollEventsInput(last_seen_index=last_index),
+                )
+            except Exception:
+                logger.exception("poll_events failed")
+                error_event = {
+                    "type": "ERROR",
+                    "timestamp": "",
+                    "data": {"message": "poll_events failed"},
+                }
+                yield f"data: {json.dumps(error_event)}\n\n"
+                return
+
+            for event in result.events:
+                yield f"data: {json.dumps(event)}\n\n"
+                last_index += 1
+
+            if result.turn_complete:
+                return
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

@@ -28,9 +28,26 @@ async function proxyRequest(req: NextRequest) {
 
   const upstream = await fetch(url, init);
 
-  // For SSE / streaming responses, pipe the body through directly
+  // For SSE / streaming responses, pipe through a TransformStream to
+  // ensure Next.js dev server flushes each chunk immediately.
   if (upstream.headers.get("content-type")?.includes("text/event-stream")) {
-    return new Response(upstream.body, {
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    const reader = upstream.body!.getReader();
+
+    (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await writer.write(value);
+        }
+      } finally {
+        await writer.close();
+      }
+    })();
+
+    return new Response(readable, {
       status: upstream.status,
       headers: {
         "Content-Type": "text/event-stream",
@@ -55,3 +72,4 @@ export const GET = proxyRequest;
 export const POST = proxyRequest;
 export const PUT = proxyRequest;
 export const DELETE = proxyRequest;
+

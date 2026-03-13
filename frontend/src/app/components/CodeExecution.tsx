@@ -11,6 +11,7 @@ interface CodeExecutionProps {
   status: "running" | "done" | "error";
   result?: Record<string, unknown>;
   error?: string;
+  duration?: number; // Pre-computed from event timestamps (for replay)
 }
 
 function getLanguage(toolName: string): string {
@@ -48,6 +49,7 @@ export default function CodeExecution({
   status,
   result,
   error,
+  duration,
 }: CodeExecutionProps) {
   const [expanded, setExpanded] = useState(status === "running");
   const [elapsed, setElapsed] = useState(0);
@@ -72,12 +74,14 @@ export default function CodeExecution({
   const language = getLanguage(toolName);
   const code = getCode(toolName, args);
 
+  const displayDuration = duration ?? elapsed;
+
   const statusLabel =
     status === "running"
-      ? `Running ${label}... ${elapsed.toFixed(1)}s`
+      ? `Running ${label}... ${displayDuration.toFixed(1)}s`
       : status === "error"
-        ? `${label} failed · ${elapsed.toFixed(1)}s`
-        : `Executed ${label} · ${elapsed.toFixed(1)}s`;
+        ? `${label} failed · ${displayDuration.toFixed(1)}s`
+        : `Executed ${label} · ${displayDuration.toFixed(1)}s`;
 
   return (
     <div className="mb-1">

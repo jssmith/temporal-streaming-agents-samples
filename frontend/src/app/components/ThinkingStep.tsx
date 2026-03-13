@@ -5,10 +5,11 @@ import { useState, useEffect, useRef } from "react";
 interface ThinkingStepProps {
   status: "active" | "done";
   content: string;
+  duration?: number; // Pre-computed from event timestamps (for replay)
   isLast?: boolean;
 }
 
-export default function ThinkingStep({ status, content, isLast }: ThinkingStepProps) {
+export default function ThinkingStep({ status, content, duration, isLast }: ThinkingStepProps) {
   const [manualToggle, setManualToggle] = useState<boolean | null>(null);
   const expanded = manualToggle ?? (isLast === true);
   const [elapsed, setElapsed] = useState(0);
@@ -35,10 +36,14 @@ export default function ThinkingStep({ status, content, isLast }: ThinkingStepPr
     }
   }, [status]);
 
+  // Use pre-computed duration from event timestamps if available,
+  // otherwise fall back to wall-clock elapsed time
+  const displayDuration = duration ?? elapsed;
+
   const label =
     status === "active"
-      ? `Thinking... ${elapsed.toFixed(1)}s`
-      : `Thought for ${elapsed.toFixed(1)}s`;
+      ? `Thinking... ${displayDuration.toFixed(1)}s`
+      : `Thought for ${displayDuration.toFixed(1)}s`;
 
   return (
     <div className="mb-1">

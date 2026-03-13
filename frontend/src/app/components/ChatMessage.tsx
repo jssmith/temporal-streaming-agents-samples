@@ -8,6 +8,8 @@ export interface ThinkingStepData {
   id: string;
   status: "active" | "done";
   content: string;
+  startedAt?: string; // ISO timestamp from backend
+  duration?: number;  // seconds, computed from event timestamps
 }
 
 export interface ToolCallData {
@@ -17,6 +19,8 @@ export interface ToolCallData {
   status: "running" | "done" | "error";
   result?: Record<string, unknown>;
   error?: string;
+  startedAt?: string; // ISO timestamp from backend
+  duration?: number;  // seconds, computed from event timestamps
 }
 
 export type Step =
@@ -54,6 +58,7 @@ export function AgentMessage({ steps }: AgentMessageProps) {
                 key={`thinking-${step.data.id}`}
                 status={step.data.status}
                 content={step.data.content}
+                duration={step.data.duration}
                 isLast={i === steps.length - 1}
               />
             );
@@ -68,6 +73,7 @@ export function AgentMessage({ steps }: AgentMessageProps) {
                 status={step.data.status}
                 result={step.data.result}
                 error={step.data.error}
+                duration={step.data.duration}
               />
             );
           }

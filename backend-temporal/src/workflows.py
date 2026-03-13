@@ -122,6 +122,7 @@ class AnalyticsWorkflow:
         self._pending_message: str | None = None
         self._turn_complete: bool = True
         self._interrupted: bool = False
+        self._closed: bool = False
         self._response_id: str | None = state.response_id
         self._working_dir: str = state.working_dir
         self._schema: str | None = state.db_schema
@@ -153,6 +154,10 @@ class AnalyticsWorkflow:
         self._interrupted = True
 
     @workflow.signal
+    def close_session(self) -> None:
+        self._closed = True
+
+    @workflow.signal
     def receive_events(self, input: ActivityEventsInput) -> None:
         self._event_list.extend(input.events)
 
@@ -182,6 +187,8 @@ class AnalyticsWorkflow:
         return SessionInfo(
             session_id=workflow.info().workflow_id,
             messages=self._messages,
+            events=self._event_list,
+            turn_in_progress=not self._turn_complete,
         )
 
     # -- main loop --
@@ -199,8 +206,10 @@ class AnalyticsWorkflow:
 
         while True:
             await workflow.wait_condition(
-                lambda: self._pending_message is not None
+                lambda: self._pending_message is not None or self._closed
             )
+            if self._closed:
+                return
             message: str = self._pending_message  # type: ignore[assignment]
             self._pending_message = None
             self._turn_complete = False
@@ -226,6 +235,7 @@ class AnalyticsWorkflow:
             "timestamp": workflow.now().isoformat(),
         })
 
+        self._emit("USER_MESSAGE", content=message)
         self._emit("AGENT_START", agent_name="analyst")
 
         system_prompt = self._build_system_prompt()

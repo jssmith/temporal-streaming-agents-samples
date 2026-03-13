@@ -1,5 +1,6 @@
 """FastAPI application for the analytics agent."""
 
+import asyncio
 import logging
 from collections import defaultdict
 
@@ -29,6 +30,18 @@ app.add_middleware(
 # Event buffers for reconnection: session_id -> list of SSE strings
 _event_buffers: dict[str, list[str]] = defaultdict(list)
 _abort_flags: dict[str, bool] = {}
+
+# Signaling for stream subscribers: notified when new events are appended
+# or when the turn ends.
+_stream_signals: dict[str, asyncio.Event] = {}
+_turn_active: dict[str, bool] = {}
+
+
+def _notify(session_id: str) -> None:
+    """Wake any /stream subscribers waiting for new events."""
+    sig = _stream_signals.get(session_id)
+    if sig:
+        sig.set()
 
 
 @app.on_event("startup")
@@ -73,16 +86,12 @@ async def create_session_endpoint():
     return CreateSessionResponse(session_id=session.session_id)
 
 
-class SessionMessages(BaseModel):
-    messages: list[dict]
-
-
-@app.get("/api/sessions/{session_id}", response_model=SessionMessages)
+@app.get("/api/sessions/{session_id}")
 async def get_session_endpoint(session_id: str):
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return SessionMessages(messages=session.messages)
+    return {"session_id": session.session_id}
 
 
 class RunRequest(BaseModel):
@@ -96,6 +105,9 @@ async def run_session(session_id: str, request: RunRequest):
         raise HTTPException(status_code=404, detail="Session not found")
 
     _abort_flags[session_id] = False
+    _turn_active[session_id] = True
+    if session_id not in _stream_signals:
+        _stream_signals[session_id] = asyncio.Event()
 
     async def generate():
         event_buffer = _event_buffers[session_id]
@@ -106,12 +118,17 @@ async def run_session(session_id: str, request: RunRequest):
                     break
                 sse_str = event.to_sse()
                 event_buffer.append(sse_str)
+                _notify(session_id)
                 yield sse_str
         except Exception:
             logger.exception("Error in agent turn for session %s", session_id)
             error_event = SSEEvent.error("Internal server error").to_sse()
             event_buffer.append(error_event)
+            _notify(session_id)
             yield error_event
+        finally:
+            _turn_active[session_id] = False
+            _notify(session_id)
 
     return StreamingResponse(
         generate(),
@@ -132,13 +149,52 @@ async def interrupt_session(session_id: str):
     return {"status": "interrupted"}
 
 
-@app.get("/api/events/{session_id}")
-async def get_events(session_id: str, from_index: int = 0):
-    events = _event_buffers.get(session_id, [])
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted"}
+
+
+@app.get("/api/sessions/{session_id}/stream")
+async def stream_events(session_id: str, from_index: int = 0):
+    """Replay buffered events then stream live events until the turn ends."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_id not in _stream_signals:
+        _stream_signals[session_id] = asyncio.Event()
+
+    async def generate():
+        last_index = from_index
+        signal = _stream_signals[session_id]
+
+        while True:
+            # Send any buffered events we haven't sent yet
+            events = _event_buffers.get(session_id, [])
+            new_events = events[last_index:]
+            for sse_str in new_events:
+                yield sse_str
+                last_index += 1
+
+            # If no turn is active and we've sent everything, we're done
+            if not _turn_active.get(session_id, False):
+                return
+
+            # Wait for new events or turn end
+            signal.clear()
+            await signal.wait()
+
     return StreamingResponse(
-        iter(events[from_index:]),
+        generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

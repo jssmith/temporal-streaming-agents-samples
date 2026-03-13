@@ -26,73 +26,78 @@ interface ChatMessage {
   steps?: Step[];
 }
 
-type AppState = "idle" | "sending" | "running" | "complete" | "error";
+type AppState = "idle" | "sending" | "running" | "error";
 
-// --- localStorage persistence ---
-
-const STORAGE_KEY_SESSIONS = "analytics-sessions";
-const STORAGE_KEY_MESSAGES = "analytics-messages";
-
-function loadSessions(): SessionTab[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_SESSIONS);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveSessions(sessions: SessionTab[]) {
-  localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions));
-}
-
-function loadMessages(sessionId: string): ChatMessage[] {
-  try {
-    const raw = localStorage.getItem(`${STORAGE_KEY_MESSAGES}:${sessionId}`);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveMessages(sessionId: string, messages: ChatMessage[]) {
-  localStorage.setItem(`${STORAGE_KEY_MESSAGES}:${sessionId}`, JSON.stringify(messages));
-}
-
-function deleteMessages(sessionId: string) {
-  localStorage.removeItem(`${STORAGE_KEY_MESSAGES}:${sessionId}`);
-}
-
-// --- Reducer for agent turn state ---
+// --- Chat state reducer ---
+// All UI state is derived from events. The reducer handles:
+// - USER_MESSAGE: adds a user message
+// - AGENT_COMPLETE: snapshots the in-progress turn into a completed agent message
+// - Turn events (thinking, tool calls, text): update the in-progress turn
 
 interface TurnState {
   steps: Step[];
   thinkingCounter: number;
 }
 
-type TurnAction =
-  | { type: "THINKING_START" }
-  | { type: "THINKING_DELTA"; delta: string }
-  | { type: "THINKING_COMPLETE"; content: string }
-  | { type: "TOOL_CALL_START"; callId: string; toolName: string; arguments: Record<string, unknown> }
-  | { type: "TOOL_CALL_COMPLETE"; callId: string; toolName: string; result?: Record<string, unknown>; error?: string }
-  | { type: "TEXT_DELTA"; delta: string }
-  | { type: "TEXT_COMPLETE"; text: string }
-  | { type: "RESET" };
+interface ChatState {
+  messages: ChatMessage[];
+  currentTurn: TurnState;
+}
 
-function turnReducer(state: TurnState, action: TurnAction): TurnState {
+type ChatAction =
+  | { type: "USER_MESSAGE"; content: string }
+  | { type: "AGENT_COMPLETE" }
+  | { type: "CLEAR" }
+  | { type: "THINKING_START"; timestamp?: string }
+  | { type: "THINKING_DELTA"; delta: string }
+  | { type: "THINKING_COMPLETE"; content: string; timestamp?: string }
+  | { type: "TOOL_CALL_START"; callId: string; toolName: string; arguments: Record<string, unknown>; timestamp?: string }
+  | { type: "TOOL_CALL_COMPLETE"; callId: string; toolName: string; result?: Record<string, unknown>; error?: string; timestamp?: string }
+  | { type: "TEXT_DELTA"; delta: string }
+  | { type: "TEXT_COMPLETE"; text: string };
+
+function chatReducer(state: ChatState, action: ChatAction): ChatState {
+  switch (action.type) {
+    case "USER_MESSAGE": {
+      // Dedup: skip if last message is already this user message (optimistic add)
+      const last = state.messages[state.messages.length - 1];
+      if (last?.role === "user" && last.content === action.content) {
+        return state;
+      }
+      return {
+        ...state,
+        messages: [...state.messages, { role: "user", content: action.content }],
+      };
+    }
+
+    case "AGENT_COMPLETE": {
+      if (state.currentTurn.steps.length === 0) return state;
+      return {
+        messages: [...state.messages, { role: "agent", steps: [...state.currentTurn.steps] }],
+        currentTurn: { steps: [], thinkingCounter: 0 },
+      };
+    }
+
+    case "CLEAR":
+      return { messages: [], currentTurn: { steps: [], thinkingCounter: 0 } };
+
+    // --- Turn events: update currentTurn ---
+    default:
+      return { ...state, currentTurn: turnReducer(state.currentTurn, action) };
+  }
+}
+
+function turnReducer(state: TurnState, action: ChatAction): TurnState {
   const steps = [...state.steps];
 
   switch (action.type) {
     case "THINKING_START": {
-      // Reuse existing active thinking step (created optimistically on send)
       const hasActive = steps.some(
         (s) => s.type === "thinking" && s.data.status === "active"
       );
       if (hasActive) return state;
       const id = `t${state.thinkingCounter}`;
-      steps.push({ type: "thinking", data: { id, status: "active", content: "" } });
+      steps.push({ type: "thinking", data: { id, status: "active", content: "", startedAt: action.timestamp } });
       return { ...state, steps, thinkingCounter: state.thinkingCounter + 1 };
     }
     case "THINKING_DELTA": {
@@ -112,9 +117,13 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
       for (let i = steps.length - 1; i >= 0; i--) {
         const step = steps[i];
         if (step.type === "thinking" && step.data.status === "active") {
+          let duration: number | undefined;
+          if (step.data.startedAt && action.timestamp) {
+            duration = (new Date(action.timestamp).getTime() - new Date(step.data.startedAt).getTime()) / 1000;
+          }
           steps[i] = {
             ...step,
-            data: { ...step.data, status: "done", content: action.content },
+            data: { ...step.data, status: "done", content: action.content, duration },
           };
           break;
         }
@@ -134,6 +143,7 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
           toolName: action.toolName,
           arguments: action.arguments,
           status: "running",
+          startedAt: action.timestamp,
         },
       });
       return { ...state, steps };
@@ -144,6 +154,10 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
       );
       if (idx >= 0) {
         const step = steps[idx] as { type: "tool_call"; data: ToolCallData };
+        let duration: number | undefined;
+        if (step.data.startedAt && action.timestamp) {
+          duration = (new Date(action.timestamp).getTime() - new Date(step.data.startedAt).getTime()) / 1000;
+        }
         steps[idx] = {
           ...step,
           data: {
@@ -151,6 +165,7 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
             status: action.error ? "error" : "done",
             result: action.result,
             error: action.error,
+            duration,
           },
         };
       }
@@ -182,8 +197,6 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
       }
       return { ...state, steps };
     }
-    case "RESET":
-      return { steps: [], thinkingCounter: 0 };
     default:
       return state;
   }
@@ -194,83 +207,162 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
 export default function Home() {
   const [sessions, setSessions] = useState<SessionTab[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [appState, setAppState] = useState<AppState>("idle");
   const [queuedMessage, setQueuedMessage] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const initializedRef = useRef(false);
 
-  const [turnState, dispatchTurn] = useReducer(turnReducer, {
-    steps: [],
-    thinkingCounter: 0,
+  const [chatState, dispatch] = useReducer(chatReducer, {
+    messages: [],
+    currentTurn: { steps: [], thinkingCounter: 0 },
   });
 
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, turnState.steps]);
+  }, [chatState.messages, chatState.currentTurn.steps]);
 
-  // Restore sessions from localStorage on mount
+  // Fetch session list from backend on mount
   useEffect(() => {
-    if (initializedRef.current) return;
-    initializedRef.current = true;
-
-    const saved = loadSessions();
-    if (saved.length > 0) {
-      setSessions(saved);
-      const firstId = saved[0].sessionId;
-      setActiveSessionId(firstId);
-      setMessages(loadMessages(firstId));
-
-      // Ensure backend has these sessions (they may have been lost on backend restart)
-      for (const s of saved) {
-        fetch(`/api/sessions/${s.sessionId}`).then((res) => {
-          if (res.status === 404) {
-            // Re-create on backend
-            fetch("/api/sessions", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ session_id: s.sessionId }),
-            });
-          }
-        });
-      }
-    }
+    fetch("/api/sessions")
+      .then((res) => res.json())
+      .then((data: { session_id: string; message_count: number; preview: string }[]) => {
+        const tabs: SessionTab[] = data.map((s) => ({
+          sessionId: s.session_id,
+          preview: s.preview,
+          messageCount: s.message_count,
+        }));
+        setSessions(tabs);
+        if (tabs.length > 0) {
+          setActiveSessionId(tabs[0].sessionId);
+          connectToStream(tabs[0].sessionId);
+        }
+      })
+      .catch(() => {});
   }, []);
 
-  // Persist sessions to localStorage whenever they change
-  useEffect(() => {
-    saveSessions(sessions);
-  }, [sessions]);
+  // --- SSE processing ---
 
-  // Persist messages whenever they change
-  useEffect(() => {
-    if (activeSessionId && messages.length > 0) {
-      saveMessages(activeSessionId, messages);
+  function processEvent(event: SSEEvent) {
+    const d = event.data;
+    switch (event.type) {
+      case "USER_MESSAGE":
+        dispatch({ type: "USER_MESSAGE", content: d.content as string });
+        break;
+      case "AGENT_START":
+        setAppState("running");
+        break;
+      case "AGENT_COMPLETE":
+        dispatch({ type: "AGENT_COMPLETE" });
+        setAppState("idle");
+        break;
+      case "THINKING_START":
+        dispatch({ type: "THINKING_START", timestamp: event.timestamp });
+        break;
+      case "THINKING_DELTA":
+        dispatch({ type: "THINKING_DELTA", delta: d.delta as string });
+        break;
+      case "THINKING_COMPLETE":
+        dispatch({ type: "THINKING_COMPLETE", content: d.content as string, timestamp: event.timestamp });
+        break;
+      case "TOOL_CALL_START":
+        dispatch({
+          type: "TOOL_CALL_START",
+          callId: d.call_id as string,
+          toolName: d.tool_name as string,
+          arguments: d.arguments as Record<string, unknown>,
+          timestamp: event.timestamp,
+        });
+        break;
+      case "TOOL_CALL_COMPLETE":
+        dispatch({
+          type: "TOOL_CALL_COMPLETE",
+          callId: d.call_id as string,
+          toolName: d.tool_name as string,
+          result: d.result as Record<string, unknown> | undefined,
+          error: d.error as string | undefined,
+          timestamp: event.timestamp,
+        });
+        break;
+      case "TEXT_DELTA":
+        dispatch({ type: "TEXT_DELTA", delta: d.delta as string });
+        break;
+      case "TEXT_COMPLETE":
+        dispatch({ type: "TEXT_COMPLETE", text: d.text as string });
+        break;
     }
-  }, [messages, activeSessionId]);
+  }
+
+  function consumeSSEStream(reader: ReadableStreamDefaultReader<Uint8Array>) {
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n\n");
+          buffer = lines.pop() || "";
+
+          for (const chunk of lines) {
+            if (!chunk.startsWith("data: ")) continue;
+            try {
+              const event: SSEEvent = JSON.parse(chunk.slice(6));
+              processEvent(event);
+            } catch {
+              // skip malformed events
+            }
+          }
+        }
+        setAppState("idle");
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") {
+          setAppState("idle");
+        } else {
+          setAppState("error");
+        }
+      }
+    })();
+  }
+
+  // --- Session management ---
+
+  function connectToStream(sessionId: string) {
+    abortRef.current?.abort(); // Cancel any in-flight connection (strict mode double-mount)
+    dispatch({ type: "CLEAR" });
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    fetch(`/api/sessions/${sessionId}/stream?from_index=0`, {
+      signal: controller.signal,
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        consumeSSEStream(res.body!.getReader());
+      })
+      .catch((err) => {
+        if (!(err instanceof Error && err.name === "AbortError")) {
+          setAppState("error");
+        }
+      });
+  }
 
   function createNewSession() {
-    // Save current session's messages before switching away
-    if (activeSessionId && messages.length > 0) {
-      saveMessages(activeSessionId, messages);
-    }
-
-    // Abort any in-flight request
     if (appState === "running") {
       abortRef.current?.abort();
     }
 
-    // Just clear to the welcome state — backend session created lazily on first message
     setActiveSessionId(null);
-    setMessages([]);
+    dispatch({ type: "CLEAR" });
     setInput("");
     setAppState("idle");
     setQueuedMessage(null);
-    dispatchTurn({ type: "RESET" });
 
     setTimeout(() => inputRef.current?.focus(), 50);
   }
@@ -278,90 +370,67 @@ export default function Home() {
   function deleteSession(sessionId: string) {
     setSessions((prev) => {
       const updated = prev.filter((s) => s.sessionId !== sessionId);
-      saveSessions(updated);
 
-      // If we're deleting the active session, switch to another or clear
       if (sessionId === activeSessionId) {
         if (updated.length > 0) {
-          switchToSession(updated[0].sessionId);
+          setActiveSessionId(updated[0].sessionId);
+          connectToStream(updated[0].sessionId);
         } else {
           setActiveSessionId(null);
-          setMessages([]);
+          dispatch({ type: "CLEAR" });
         }
       }
 
       return updated;
     });
 
-    deleteMessages(sessionId);
+    fetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
   }
 
   function switchToSession(sessionId: string) {
-    // Save current session's messages
-    if (activeSessionId && messages.length > 0) {
-      saveMessages(activeSessionId, messages);
-    }
-
-    // Abort any in-flight request
     if (appState === "running") {
       abortRef.current?.abort();
     }
 
     setActiveSessionId(sessionId);
-    setMessages(loadMessages(sessionId));
     setInput("");
     setAppState("idle");
     setQueuedMessage(null);
-    dispatchTurn({ type: "RESET" });
+    connectToStream(sessionId);
 
-    // Focus input
     setTimeout(() => inputRef.current?.focus(), 50);
-  }
-
-  // Keep sidebar preview in sync with messages
-  function updateSessionPreview(sessionId: string, firstUserMessage: string) {
-    setSessions((prev) => {
-      const updated = prev.map((s) =>
-        s.sessionId === sessionId
-          ? { ...s, preview: firstUserMessage.slice(0, 80), messageCount: s.messageCount + 1 }
-          : s
-      );
-      saveSessions(updated);
-      return updated;
-    });
   }
 
   const sendMessage = useCallback(
     async (text: string) => {
       if (!text.trim()) return;
 
-      // Auto-create a session if none is active
       let sessionId = activeSessionId;
       if (!sessionId) {
         const res = await fetch("/api/sessions", { method: "POST" });
         const data = await res.json();
         sessionId = data.session_id as string;
-        const newSession = { sessionId, preview: text.slice(0, 80), messageCount: 0 };
-        setSessions((prev) => {
-          const updated = [newSession, ...prev];
-          saveSessions(updated);
-          return updated;
-        });
+        const newSession: SessionTab = { sessionId, preview: text.slice(0, 80), messageCount: 0 };
+        setSessions((prev) => [newSession, ...prev]);
         setActiveSessionId(sessionId);
       }
 
-      const newMessages: ChatMessage[] = [...messages, { role: "user", content: text }];
-      setMessages(newMessages);
+      // Optimistic: show user message immediately (deduped when event arrives)
+      dispatch({ type: "USER_MESSAGE", content: text });
+      // Optimistic: show thinking indicator while waiting for first event
+      dispatch({ type: "THINKING_START" });
       setInput("");
       setAppState("sending");
-      dispatchTurn({ type: "RESET" });
-      // Show thinking indicator immediately while waiting for SSE
-      dispatchTurn({ type: "THINKING_START" });
 
-      // Update preview if this is the first user message
-      const userMsgCount = newMessages.filter((m) => m.role === "user").length;
-      if (userMsgCount === 1) {
-        updateSessionPreview(sessionId, text);
+      // Update sidebar preview if this is the first user message
+      if (chatState.messages.filter((m) => m.role === "user").length === 0) {
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.sessionId === sessionId
+              ? { ...s, preview: text.slice(0, 80), messageCount: s.messageCount + 1 }
+              : s
+          )
+        );
       }
 
       const controller = new AbortController();
@@ -377,33 +446,7 @@ export default function Home() {
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-        setAppState("running");
-
-        const reader = res.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n\n");
-          buffer = lines.pop() || "";
-
-          for (const chunk of lines) {
-            if (!chunk.startsWith("data: ")) continue;
-            const jsonStr = chunk.slice(6);
-            try {
-              const event: SSEEvent = JSON.parse(jsonStr);
-              processEvent(event);
-            } catch {
-              // skip malformed events
-            }
-          }
-        }
-
-        setAppState("complete");
+        consumeSSEStream(res.body!.getReader());
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "AbortError") {
           setAppState("idle");
@@ -412,72 +455,17 @@ export default function Home() {
         }
       }
     },
-    [activeSessionId, messages]
+    [activeSessionId, chatState.messages]
   );
 
   // Process a queued message after turn completes
   useEffect(() => {
-    if (appState === "complete" && queuedMessage) {
+    if (appState === "idle" && queuedMessage) {
       const msg = queuedMessage;
       setQueuedMessage(null);
       sendMessage(msg);
     }
   }, [appState, queuedMessage, sendMessage]);
-
-  // Snapshot agent turn into messages when complete
-  useEffect(() => {
-    if (
-      (appState === "complete" || appState === "idle") &&
-      turnState.steps.length > 0
-    ) {
-      setMessages((prev) => {
-        const updated = [...prev, { role: "agent" as const, steps: [...turnState.steps] }];
-        if (activeSessionId) {
-          saveMessages(activeSessionId, updated);
-        }
-        return updated;
-      });
-      dispatchTurn({ type: "RESET" });
-    }
-  }, [appState, turnState.steps, activeSessionId]);
-
-  function processEvent(event: SSEEvent) {
-    const d = event.data;
-    switch (event.type) {
-      case "THINKING_START":
-        dispatchTurn({ type: "THINKING_START" });
-        break;
-      case "THINKING_DELTA":
-        dispatchTurn({ type: "THINKING_DELTA", delta: d.delta as string });
-        break;
-      case "THINKING_COMPLETE":
-        dispatchTurn({ type: "THINKING_COMPLETE", content: d.content as string });
-        break;
-      case "TOOL_CALL_START":
-        dispatchTurn({
-          type: "TOOL_CALL_START",
-          callId: d.call_id as string,
-          toolName: d.tool_name as string,
-          arguments: d.arguments as Record<string, unknown>,
-        });
-        break;
-      case "TOOL_CALL_COMPLETE":
-        dispatchTurn({
-          type: "TOOL_CALL_COMPLETE",
-          callId: d.call_id as string,
-          toolName: d.tool_name as string,
-          result: d.result as Record<string, unknown> | undefined,
-          error: d.error as string | undefined,
-        });
-        break;
-      case "TEXT_DELTA":
-        dispatchTurn({ type: "TEXT_DELTA", delta: d.delta as string });
-        break;
-      case "TEXT_COMPLETE":
-        dispatchTurn({ type: "TEXT_COMPLETE", text: d.text as string });
-        break;
-    }
-  }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -508,7 +496,7 @@ export default function Home() {
     sendMessage(prompt);
   }
 
-  const isEmptyChat = messages.length === 0 && turnState.steps.length === 0;
+  const isEmptyChat = chatState.messages.length === 0 && chatState.currentTurn.steps.length === 0;
 
   return (
     <div className="flex h-screen">
@@ -547,7 +535,7 @@ export default function Home() {
               </div>
             )}
 
-            {messages.map((msg, i) => {
+            {chatState.messages.map((msg, i) => {
               if (msg.role === "user") {
                 return <UserMessage key={i} content={msg.content!} />;
               }
@@ -555,7 +543,9 @@ export default function Home() {
             })}
 
             {/* Live agent turn */}
-            {turnState.steps.length > 0 && <AgentMessage steps={turnState.steps} />}
+            {chatState.currentTurn.steps.length > 0 && (
+              <AgentMessage steps={chatState.currentTurn.steps} />
+            )}
 
             <div ref={messagesEndRef} />
           </div>

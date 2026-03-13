@@ -20,6 +20,10 @@ class SSEEvent:
         return f"data: {json.dumps(payload)}\n\n"
 
     @staticmethod
+    def user_message(content: str) -> "SSEEvent":
+        return SSEEvent(type="USER_MESSAGE", data={"content": content})
+
+    @staticmethod
     def agent_start(agent_name: str = "analyst") -> "SSEEvent":
         return SSEEvent(type="AGENT_START", data={"agent_name": agent_name})
 

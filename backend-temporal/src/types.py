@@ -45,6 +45,8 @@ class PollEventsResult(BaseModel):
 class SessionInfo(BaseModel):
     session_id: str
     messages: list[dict]
+    events: list[dict] = []
+    turn_in_progress: bool = False
 
 
 # -- Activity I/O --
