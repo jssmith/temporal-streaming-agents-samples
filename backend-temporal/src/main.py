@@ -155,7 +155,10 @@ async def run_session(session_id: str, request: RunRequest):
     handle = client.get_workflow_handle(session_id)
 
     # Verify workflow is running
-    desc = await handle.describe()
+    try:
+        desc = await handle.describe()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Session not found")
     if desc.status != WorkflowExecutionStatus.RUNNING:
         raise HTTPException(status_code=404, detail="Session not running")
 
