@@ -360,7 +360,6 @@ async def execute_tool(input: ToolInput) -> ToolResult:
         await batcher.flush()
 
     working_dir = Path(input.working_dir)
-    activity.heartbeat("executing")
     result = await _run_tool(input.tool_name, input.arguments, working_dir)
 
     return ToolResult(

@@ -317,7 +317,6 @@ class AnalyticsWorkflow:
                         operation_id=str(workflow.uuid4()),
                     ),
                     start_to_close_timeout=timedelta(seconds=60),
-                    heartbeat_timeout=timedelta(seconds=45),
                     retry_policy=retry_policy,
                     result_type=ToolResult,
                 )
