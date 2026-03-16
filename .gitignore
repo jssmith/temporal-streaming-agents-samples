@@ -1,9 +1,16 @@
+# Application data
 data/
 sessions/
+
+# Python
 __pycache__/
 *.pyc
 .venv/
+
+# Node / Frontend
 node_modules/
 .next/
-.env
 *.tsbuildinfo
+
+# Environment
+.env
