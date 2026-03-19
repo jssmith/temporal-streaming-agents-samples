@@ -3,7 +3,7 @@
 import pytest
 
 from src import sessions as sessions_mod
-from src.sessions import Session, create_session, get_session, list_sessions
+from src.sessions import Session, create_session, delete_session, get_session, list_sessions
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +44,15 @@ class TestSessionStore:
         ids = {s.session_id for s in all_sessions}
         assert s1.session_id in ids
         assert s2.session_id in ids
+
+    def test_delete_session_removes_it(self):
+        session = create_session()
+        assert delete_session(session.session_id) is True
+        assert get_session(session.session_id) is None
+        assert list_sessions() == []
+
+    def test_delete_session_returns_false_for_missing(self):
+        assert delete_session("nonexistent") is False
 
     def test_session_defaults(self):
         session = create_session()

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from .agent import run_agent_turn
 from .database import load_schema
 from .events import SSEEvent
-from .sessions import create_session, get_session, list_sessions
+from .sessions import create_session, delete_session as remove_session, get_session, list_sessions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -150,10 +150,14 @@ async def interrupt_session(session_id: str):
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    session = get_session(session_id)
-    if not session:
+async def delete_session_endpoint(session_id: str):
+    if not remove_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
+    # Clean up associated state
+    _abort_flags.pop(session_id, None)
+    _turn_active.pop(session_id, None)
+    _event_buffers.pop(session_id, None)
+    _stream_signals.pop(session_id, None)
     return {"status": "deleted"}
 
 

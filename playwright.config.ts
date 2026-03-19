@@ -19,7 +19,7 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: "cd frontend && npm run dev",
+      command: "cd frontend && BACKEND_URL=http://localhost:8000 npm run dev",
       port: 3001,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,

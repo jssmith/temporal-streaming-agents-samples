@@ -32,5 +32,9 @@ def get_session(session_id: str) -> Session | None:
     return _sessions.get(session_id)
 
 
+def delete_session(session_id: str) -> bool:
+    return _sessions.pop(session_id, None) is not None
+
+
 def list_sessions() -> list[Session]:
     return list(_sessions.values())

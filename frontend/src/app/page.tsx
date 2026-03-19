@@ -117,9 +117,7 @@ export default function Home() {
   }
 
   function createNewSession() {
-    if (appState === "running") {
-      abortRef.current?.abort();
-    }
+    abortRef.current?.abort();
 
     setActiveSessionId(null);
     dispatch({ type: "CLEAR" });
