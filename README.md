@@ -323,7 +323,7 @@ E2E tests auto-start the ephemeral backend and frontend via Playwright's
 - Node.js 18+
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal` on macOS)
-- OpenAI API key
+- OpenAI API key (full-access, or a restricted key with Write access to `/v1/responses`)
 
 ### Setup
 
@@ -345,6 +345,10 @@ E2E tests auto-start the ephemeral backend and frontend via Playwright's
 temporal server start-dev
 
 # Terminal 2: Worker
+# Note: this sample uses the OpenAI Responses API with gpt-4.1. A full-access
+# project key works, or a restricted key with Write permission for /v1/responses.
+# Read-only keys will fail. No permissions for Assistants or OpenAI-hosted tools
+# are required.
 export OPENAI_API_KEY=sk-...
 cd backend-temporal
 uv run python -m src.worker
@@ -367,6 +371,10 @@ same agent with the same frontend but keeps all state in memory.
 
 ```bash
 # Terminal 1: Backend (port 8001)
+# Note: this sample uses the OpenAI Responses API with gpt-4.1. A full-access
+# project key works, or a restricted key with Write permission for /v1/responses.
+# Read-only keys will fail. No permissions for Assistants or OpenAI-hosted tools
+# are required.
 export OPENAI_API_KEY=sk-...
 cd backend-ephemeral
 uv sync
