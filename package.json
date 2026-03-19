@@ -2,7 +2,8 @@
   "private": true,
   "scripts": {
     "dev:frontend": "cd frontend && npm run dev",
-    "test:e2e": "npx playwright test"
+    "test:e2e": "npx playwright test",
+    "record:demo": "npx playwright test --config playwright.recording.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0"
