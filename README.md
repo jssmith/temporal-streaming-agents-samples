@@ -295,6 +295,28 @@ See [backend-temporal/ARCHITECTURE.md](backend-temporal/ARCHITECTURE.md) for
 implementation details including event types, failure modes, and recovery
 behavior.
 
+### Testing
+
+Unit tests cover pure logic (reducers, event serialization, tool guards, Pydantic
+types). E2E tests hit the real OpenAI API through Playwright.
+
+```bash
+# Frontend unit tests (Vitest)
+cd frontend && npx vitest run
+
+# Backend-ephemeral unit tests (pytest)
+cd backend-ephemeral && uv run python -m pytest tests/ --timeout=30
+
+# Backend-temporal unit tests (pytest)
+cd backend-temporal && uv run python -m pytest tests/ --timeout=30
+
+# E2E tests (Playwright, requires OPENAI_API_KEY)
+npx playwright test
+```
+
+E2E tests auto-start the ephemeral backend and frontend via Playwright's
+`webServer` config. They skip if `OPENAI_API_KEY` is not set.
+
 ### Prerequisites
 
 - Python 3.12+

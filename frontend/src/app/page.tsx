@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useReducer } from "react";
-import { UserMessage, AgentMessage, Step, ToolCallData } from "./components/ChatMessage";
+import { UserMessage, AgentMessage } from "./components/ChatMessage";
 import Sidebar, { SessionTab } from "./components/Sidebar";
+import { chatReducer, initialChatState, SSEEvent } from "../lib/chatReducer";
+import { processEvent, AppState } from "../lib/processEvent";
 
 const SUGGESTED_PROMPTS = [
   "Build a bar chart of the top 10 genres by revenue",
@@ -11,196 +13,6 @@ const SUGGESTED_PROMPTS = [
   "Run a customer segmentation analysis with spending tiers",
   "Find the top 5 artists by track count and revenue side by side",
 ];
-
-// --- Types ---
-
-interface SSEEvent {
-  type: string;
-  timestamp: string;
-  data: Record<string, unknown>;
-}
-
-interface ChatMessage {
-  role: "user" | "agent";
-  content?: string;
-  steps?: Step[];
-}
-
-type AppState = "idle" | "sending" | "running" | "error";
-
-// --- Chat state reducer ---
-// All UI state is derived from events. The reducer handles:
-// - USER_MESSAGE: adds a user message
-// - AGENT_COMPLETE: snapshots the in-progress turn into a completed agent message
-// - Turn events (thinking, tool calls, text): update the in-progress turn
-
-interface TurnState {
-  steps: Step[];
-  thinkingCounter: number;
-}
-
-interface ChatState {
-  messages: ChatMessage[];
-  currentTurn: TurnState;
-}
-
-type ChatAction =
-  | { type: "USER_MESSAGE"; content: string }
-  | { type: "AGENT_COMPLETE" }
-  | { type: "CLEAR" }
-  | { type: "THINKING_START"; timestamp?: string }
-  | { type: "THINKING_DELTA"; delta: string }
-  | { type: "THINKING_COMPLETE"; content: string; timestamp?: string }
-  | { type: "TOOL_CALL_START"; callId: string; toolName: string; arguments: Record<string, unknown>; timestamp?: string }
-  | { type: "TOOL_CALL_COMPLETE"; callId: string; toolName: string; result?: Record<string, unknown>; error?: string; timestamp?: string }
-  | { type: "TEXT_DELTA"; delta: string }
-  | { type: "TEXT_COMPLETE"; text: string };
-
-function chatReducer(state: ChatState, action: ChatAction): ChatState {
-  switch (action.type) {
-    case "USER_MESSAGE": {
-      // Dedup: skip if last message is already this user message (optimistic add)
-      const last = state.messages[state.messages.length - 1];
-      if (last?.role === "user" && last.content === action.content) {
-        return state;
-      }
-      return {
-        ...state,
-        messages: [...state.messages, { role: "user", content: action.content }],
-      };
-    }
-
-    case "AGENT_COMPLETE": {
-      if (state.currentTurn.steps.length === 0) return state;
-      return {
-        messages: [...state.messages, { role: "agent", steps: [...state.currentTurn.steps] }],
-        currentTurn: { steps: [], thinkingCounter: 0 },
-      };
-    }
-
-    case "CLEAR":
-      return { messages: [], currentTurn: { steps: [], thinkingCounter: 0 } };
-
-    // --- Turn events: update currentTurn ---
-    default:
-      return { ...state, currentTurn: turnReducer(state.currentTurn, action) };
-  }
-}
-
-function turnReducer(state: TurnState, action: ChatAction): TurnState {
-  const steps = [...state.steps];
-
-  switch (action.type) {
-    case "THINKING_START": {
-      const hasActive = steps.some(
-        (s) => s.type === "thinking" && s.data.status === "active"
-      );
-      if (hasActive) return state;
-      const id = `t${state.thinkingCounter}`;
-      steps.push({ type: "thinking", data: { id, status: "active", content: "", startedAt: action.timestamp } });
-      return { ...state, steps, thinkingCounter: state.thinkingCounter + 1 };
-    }
-    case "THINKING_DELTA": {
-      for (let i = steps.length - 1; i >= 0; i--) {
-        const step = steps[i];
-        if (step.type === "thinking" && step.data.status === "active") {
-          steps[i] = {
-            ...step,
-            data: { ...step.data, content: step.data.content + action.delta },
-          };
-          break;
-        }
-      }
-      return { ...state, steps };
-    }
-    case "THINKING_COMPLETE": {
-      for (let i = steps.length - 1; i >= 0; i--) {
-        const step = steps[i];
-        if (step.type === "thinking" && step.data.status === "active") {
-          let duration: number | undefined;
-          if (step.data.startedAt && action.timestamp) {
-            duration = (new Date(action.timestamp).getTime() - new Date(step.data.startedAt).getTime()) / 1000;
-          }
-          steps[i] = {
-            ...step,
-            data: { ...step.data, status: "done", content: action.content, duration },
-          };
-          break;
-        }
-      }
-      return { ...state, steps };
-    }
-    case "TOOL_CALL_START": {
-      // Remove empty placeholder thinking step if model went straight to tools
-      const emptyIdx = steps.findIndex(
-        (s) => s.type === "thinking" && s.data.status === "active" && !s.data.content
-      );
-      if (emptyIdx >= 0) steps.splice(emptyIdx, 1);
-      steps.push({
-        type: "tool_call",
-        data: {
-          callId: action.callId,
-          toolName: action.toolName,
-          arguments: action.arguments,
-          status: "running",
-          startedAt: action.timestamp,
-        },
-      });
-      return { ...state, steps };
-    }
-    case "TOOL_CALL_COMPLETE": {
-      const idx = steps.findIndex(
-        (s) => s.type === "tool_call" && (s.data as ToolCallData).callId === action.callId
-      );
-      if (idx >= 0) {
-        const step = steps[idx] as { type: "tool_call"; data: ToolCallData };
-        let duration: number | undefined;
-        if (step.data.startedAt && action.timestamp) {
-          duration = (new Date(action.timestamp).getTime() - new Date(step.data.startedAt).getTime()) / 1000;
-        }
-        steps[idx] = {
-          ...step,
-          data: {
-            ...step.data,
-            status: action.error ? "error" : "done",
-            result: action.result,
-            error: action.error,
-            duration,
-          },
-        };
-      }
-      return { ...state, steps };
-    }
-    case "TEXT_DELTA": {
-      // Remove empty placeholder thinking step
-      const emptyIdx = steps.findIndex(
-        (s) => s.type === "thinking" && s.data.status === "active" && !s.data.content
-      );
-      if (emptyIdx >= 0) steps.splice(emptyIdx, 1);
-      const lastStep = steps[steps.length - 1];
-      if (lastStep?.type === "output") {
-        steps[steps.length - 1] = {
-          ...lastStep,
-          text: lastStep.text + action.delta,
-        };
-      } else {
-        steps.push({ type: "output", text: action.delta });
-      }
-      return { ...state, steps };
-    }
-    case "TEXT_COMPLETE": {
-      const lastStep = steps[steps.length - 1];
-      if (lastStep?.type === "output") {
-        steps[steps.length - 1] = { ...lastStep, text: action.text };
-      } else {
-        steps.push({ type: "output", text: action.text });
-      }
-      return { ...state, steps };
-    }
-    default:
-      return state;
-  }
-}
 
 // --- Main Page ---
 
@@ -214,10 +26,7 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const [chatState, dispatch] = useReducer(chatReducer, {
-    messages: [],
-    currentTurn: { steps: [], thinkingCounter: 0 },
-  });
+  const [chatState, dispatch] = useReducer(chatReducer, initialChatState);
 
   // Auto-scroll
   useEffect(() => {
@@ -245,54 +54,8 @@ export default function Home() {
 
   // --- SSE processing ---
 
-  function processEvent(event: SSEEvent) {
-    const d = event.data;
-    switch (event.type) {
-      case "USER_MESSAGE":
-        dispatch({ type: "USER_MESSAGE", content: d.content as string });
-        break;
-      case "AGENT_START":
-        setAppState("running");
-        break;
-      case "AGENT_COMPLETE":
-        dispatch({ type: "AGENT_COMPLETE" });
-        setAppState("idle");
-        break;
-      case "THINKING_START":
-        dispatch({ type: "THINKING_START", timestamp: event.timestamp });
-        break;
-      case "THINKING_DELTA":
-        dispatch({ type: "THINKING_DELTA", delta: d.delta as string });
-        break;
-      case "THINKING_COMPLETE":
-        dispatch({ type: "THINKING_COMPLETE", content: d.content as string, timestamp: event.timestamp });
-        break;
-      case "TOOL_CALL_START":
-        dispatch({
-          type: "TOOL_CALL_START",
-          callId: d.call_id as string,
-          toolName: d.tool_name as string,
-          arguments: d.arguments as Record<string, unknown>,
-          timestamp: event.timestamp,
-        });
-        break;
-      case "TOOL_CALL_COMPLETE":
-        dispatch({
-          type: "TOOL_CALL_COMPLETE",
-          callId: d.call_id as string,
-          toolName: d.tool_name as string,
-          result: d.result as Record<string, unknown> | undefined,
-          error: d.error as string | undefined,
-          timestamp: event.timestamp,
-        });
-        break;
-      case "TEXT_DELTA":
-        dispatch({ type: "TEXT_DELTA", delta: d.delta as string });
-        break;
-      case "TEXT_COMPLETE":
-        dispatch({ type: "TEXT_COMPLETE", text: d.text as string });
-        break;
-    }
+  function handleEvent(event: SSEEvent) {
+    processEvent(event, dispatch, setAppState);
   }
 
   function consumeSSEStream(reader: ReadableStreamDefaultReader<Uint8Array>) {
@@ -313,7 +76,7 @@ export default function Home() {
             if (!chunk.startsWith("data: ")) continue;
             try {
               const event: SSEEvent = JSON.parse(chunk.slice(6));
-              processEvent(event);
+              handleEvent(event);
             } catch {
               // skip malformed events
             }
