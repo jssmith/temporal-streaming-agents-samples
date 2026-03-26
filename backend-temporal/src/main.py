@@ -1,7 +1,9 @@
 """FastAPI proxy for the Temporal-backed analytics agent."""
 
+import asyncio
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,6 +27,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TASK_QUEUE = "analytics-agent"
+# Max poll rate for execute_update calls to the workflow.
+# Caps how often the BFF polls Temporal, reducing action costs on Temporal Cloud.
+MIN_POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "0.5"))
 SESSIONS_DIR = Path(__file__).parent.parent.parent / "sessions"
 
 _client: Client | None = None
@@ -202,6 +207,7 @@ async def run_session(session_id: str, request: RunRequest):
 
             if result.turn_complete:
                 return
+            await asyncio.sleep(MIN_POLL_INTERVAL)
 
     return StreamingResponse(
         event_stream(),
@@ -268,6 +274,7 @@ async def stream_events(session_id: str, from_index: int = 0):
 
             if result.turn_complete:
                 return
+            await asyncio.sleep(MIN_POLL_INTERVAL)
 
     return StreamingResponse(
         event_stream(),
