@@ -167,7 +167,7 @@ async def run_session(session_id: str, request: RunRequest):
         raise HTTPException(status_code=404, detail="Session not running")
 
     # Get current pub/sub offset
-    pubsub = PubSubClient(handle)
+    pubsub = PubSubClient.for_workflow(client, session_id)
     start_offset = await pubsub.get_offset()
 
     # Fire-and-forget: enqueue the user message
@@ -222,8 +222,7 @@ async def interrupt_session(session_id: str):
 async def stream_events(session_id: str, from_index: int = 0):
     """Resume streaming events for an in-progress turn."""
     client = await get_client()
-    handle = client.get_workflow_handle(session_id)
-    pubsub = PubSubClient(handle)
+    pubsub = PubSubClient.for_workflow(client, session_id)
 
     async def event_stream():
         async for item in pubsub.subscribe(
