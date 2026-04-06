@@ -24,5 +24,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+[tool.uv.sources]
+temporalio = { path = "../../sdk-python", editable = true }
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

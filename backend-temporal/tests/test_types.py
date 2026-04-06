@@ -3,9 +3,6 @@
 from src.types import (
     WorkflowState,
     StartTurnInput,
-    ActivityEventsInput,
-    PollEventsInput,
-    PollEventsResult,
     SessionInfo,
     ModelCallInput,
     ModelCallResult,
@@ -19,15 +16,14 @@ class TestWorkflowState:
     def test_defaults(self):
         state = WorkflowState(working_dir="/tmp/test")
         assert state.messages == []
-        assert state.event_list == []
         assert state.response_id is None
         assert state.db_schema is None
+        assert state.pubsub_state is None
 
     def test_round_trip(self):
         state = WorkflowState(
             working_dir="/tmp/test",
             messages=[{"role": "user", "content": "hi"}],
-            event_list=[{"type": "USER_MESSAGE"}],
             response_id="resp_123",
             db_schema="CREATE TABLE...",
         )
@@ -42,43 +38,15 @@ class TestStartTurnInput:
         assert StartTurnInput.model_validate(inp.model_dump()) == inp
 
 
-class TestActivityEventsInput:
-    def test_round_trip(self):
-        inp = ActivityEventsInput(events=[{"type": "TEXT_DELTA", "data": {"delta": "hi"}}])
-        restored = ActivityEventsInput.model_validate(inp.model_dump())
-        assert restored.events == inp.events
-
-
-class TestPollEvents:
-    def test_input(self):
-        inp = PollEventsInput(last_seen_index=5)
-        assert inp.last_seen_index == 5
-
-    def test_result_defaults(self):
-        result = PollEventsResult(events=[], turn_complete=False)
-        assert result.events == []
-        assert result.turn_complete is False
-
-    def test_result_round_trip(self):
-        result = PollEventsResult(
-            events=[{"type": "TEXT_DELTA"}],
-            turn_complete=True,
-        )
-        restored = PollEventsResult.model_validate(result.model_dump())
-        assert restored == result
-
-
 class TestSessionInfo:
     def test_defaults(self):
         info = SessionInfo(session_id="s1", messages=[])
-        assert info.events == []
         assert info.turn_in_progress is False
 
     def test_round_trip(self):
         info = SessionInfo(
             session_id="s1",
             messages=[{"role": "user"}],
-            events=[{"type": "X"}],
             turn_in_progress=True,
         )
         restored = SessionInfo.model_validate(info.model_dump())

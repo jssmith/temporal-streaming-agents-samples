@@ -10,10 +10,10 @@ from pathlib import Path
 
 import openai
 from temporalio import activity
+from temporalio.contrib.pubsub import activity_pubsub_client
 from temporalio.exceptions import ApplicationError
 
 from .database import get_connection, get_db_path, load_schema as _load_schema
-from .event_batcher import EventBatcher
 from .types import (
     ModelCallInput,
     ModelCallResult,
@@ -140,20 +140,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _make_event(event_type: str, **data) -> dict:
-    return {
+EVENTS_TOPIC = "events"
+
+
+def _make_event(event_type: str, **data) -> bytes:
+    return json.dumps({
         "type": event_type,
         "timestamp": _now_iso(),
         "data": data,
-    }
-
-
-async def _get_batcher(signal_name: str = "receive_events", interval: float = 2.0) -> EventBatcher:
-    """Create an EventBatcher connected to the current workflow."""
-    info = activity.info()
-    client = activity.client()
-    handle = client.get_workflow_handle(info.workflow_id)
-    return EventBatcher(handle, signal_name, interval)
+    }).encode()
 
 
 # ---------------------------------------------------------------------------
@@ -171,153 +166,136 @@ async def load_schema() -> str:
 async def model_call(input: ModelCallInput) -> ModelCallResult:
     """Stream a model call via the OpenAI Responses API.
 
-    Signals streaming events (THINKING_DELTA, TEXT_DELTA, etc.) back to the
-    workflow via batched signals. Returns structural data (response_id,
+    Publishes streaming events (THINKING_DELTA, TEXT_DELTA, etc.) to the
+    workflow via PubSubClient. Returns structural data (response_id,
     tool_calls, final_text).
     """
-    batcher = await _get_batcher()
+    pubsub = activity_pubsub_client(batch_interval=2.0)
     info = activity.info()
 
-    # Retry detection
-    if info.attempt > 1:
-        batcher.add(_make_event(
-            "RETRY",
-            operation_id=input.operation_id,
-            attempt=info.attempt,
-            message="Retrying model call...",
-        ))
-        await batcher.flush()
+    async with pubsub:
+        # Retry detection
+        if info.attempt > 1:
+            pubsub.publish(EVENTS_TOPIC, _make_event(
+                "RETRY",
+                operation_id=input.operation_id,
+                attempt=info.attempt,
+                message="Retrying model call...",
+            ), priority=True)
 
-    client = openai.AsyncOpenAI(max_retries=0)
+        oai_client = openai.AsyncOpenAI(max_retries=0)
 
-    kwargs: dict = {
-        "model": input.model,
-        "tools": input.tools,
-        "input": input.input_messages,
-        "store": True,
-    }
-    if input.previous_response_id:
-        kwargs["previous_response_id"] = input.previous_response_id
+        kwargs: dict = {
+            "model": input.model,
+            "tools": input.tools,
+            "input": input.input_messages,
+            "store": True,
+        }
+        if input.previous_response_id:
+            kwargs["previous_response_id"] = input.previous_response_id
 
-    tool_calls: dict[str, dict] = {}
-    text_buffer = ""
-    thinking_buffer = ""
-    thinking_active = False
-    response_id = ""
+        tool_calls: dict[str, dict] = {}
+        text_buffer = ""
+        thinking_buffer = ""
+        thinking_active = False
+        response_id = ""
 
-    async def read_stream():
-        nonlocal text_buffer, thinking_buffer, thinking_active, response_id
+        try:
+            async with oai_client.responses.stream(**kwargs) as stream:
+                async for event in stream:
+                    activity.heartbeat()
+                    event_type = getattr(event, "type", None)
 
-        async with client.responses.stream(**kwargs) as stream:
-            async for event in stream:
-                activity.heartbeat()
-                event_type = getattr(event, "type", None)
+                    # Thinking/reasoning events
+                    if event_type == "response.reasoning_summary_text.delta":
+                        delta = event.delta
+                        if not thinking_active:
+                            thinking_active = True
+                            pubsub.publish(EVENTS_TOPIC, _make_event("THINKING_START"))
+                        thinking_buffer += delta
+                        pubsub.publish(EVENTS_TOPIC, _make_event("THINKING_DELTA", delta=delta))
 
-                # Thinking/reasoning events
-                if event_type == "response.reasoning_summary_text.delta":
-                    delta = event.delta
-                    if not thinking_active:
-                        thinking_active = True
-                        batcher.add(_make_event("THINKING_START"))
-                    thinking_buffer += delta
-                    batcher.add(_make_event("THINKING_DELTA", delta=delta))
+                    elif event_type == "response.reasoning_summary_text.done":
+                        if thinking_active:
+                            pubsub.publish(EVENTS_TOPIC, _make_event(
+                                "THINKING_COMPLETE", content=thinking_buffer,
+                            ), priority=True)
+                            thinking_buffer = ""
+                            thinking_active = False
 
-                elif event_type == "response.reasoning_summary_text.done":
-                    if thinking_active:
-                        batcher.add(_make_event("THINKING_COMPLETE", content=thinking_buffer))
-                        await batcher.flush()
-                        thinking_buffer = ""
-                        thinking_active = False
+                    # Text output — stream incrementally
+                    elif event_type == "response.output_text.delta":
+                        text_buffer += event.delta
+                        pubsub.publish(EVENTS_TOPIC, _make_event("TEXT_DELTA", delta=event.delta))
 
-                # Text output — stream incrementally
-                elif event_type == "response.output_text.delta":
-                    text_buffer += event.delta
-                    batcher.add(_make_event("TEXT_DELTA", delta=event.delta))
+                    # Function call argument streaming
+                    elif event_type == "response.function_call_arguments.delta":
+                        item_id = event.item_id
+                        if item_id not in tool_calls:
+                            tool_calls[item_id] = {"name": None, "arguments_str": ""}
+                        tool_calls[item_id]["arguments_str"] += event.delta
 
-                # Function call argument streaming
-                elif event_type == "response.function_call_arguments.delta":
-                    item_id = event.item_id
-                    if item_id not in tool_calls:
-                        tool_calls[item_id] = {"name": None, "arguments_str": ""}
-                    tool_calls[item_id]["arguments_str"] += event.delta
+                    elif event_type == "response.function_call_arguments.done":
+                        item_id = event.item_id
+                        if item_id in tool_calls:
+                            tool_calls[item_id]["arguments_str"] = event.arguments
 
-                elif event_type == "response.function_call_arguments.done":
-                    item_id = event.item_id
-                    if item_id in tool_calls:
-                        tool_calls[item_id]["arguments_str"] = event.arguments
+                    # Output item added — captures function name and call_id
+                    elif event_type == "response.output_item.added":
+                        item = event.item
+                        if getattr(item, "type", None) == "function_call":
+                            item_id = getattr(item, "id", None)
+                            call_id = getattr(item, "call_id", None)
+                            name = item.name
+                            if item_id:
+                                tool_calls[item_id] = {
+                                    "name": name,
+                                    "call_id": call_id,
+                                    "arguments_str": tool_calls.get(item_id, {}).get("arguments_str", ""),
+                                }
 
-                # Output item added — captures function name and call_id
-                elif event_type == "response.output_item.added":
-                    item = event.item
-                    if getattr(item, "type", None) == "function_call":
-                        item_id = getattr(item, "id", None)
-                        call_id = getattr(item, "call_id", None)
-                        name = item.name
-                        if item_id:
-                            tool_calls[item_id] = {
-                                "name": name,
-                                "call_id": call_id,
-                                "arguments_str": tool_calls.get(item_id, {}).get("arguments_str", ""),
-                            }
+                    # Response completed — capture response_id
+                    elif event_type == "response.completed":
+                        response = event.response
+                        response_id = response.id
 
-                # Response completed — capture response_id
-                elif event_type == "response.completed":
-                    response = event.response
-                    response_id = response.id
-
-    async def timer_flush():
-        await batcher.run_flusher()
-
-    try:
-        # Run both tasks concurrently, cancel timer when stream completes
-        completed, pending = await asyncio.wait(
-            [asyncio.create_task(read_stream()), asyncio.create_task(timer_flush())],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in pending:
-            t.cancel()
-        # Re-raise any exceptions from the stream task
-        for t in completed:
-            t.result()
-
-    except openai.AuthenticationError as e:
-        raise ApplicationError(
-            f"Invalid API key: {e}",
-            type="AuthenticationError",
-            non_retryable=True,
-        )
-    except openai.RateLimitError as e:
-        raise ApplicationError(
-            f"Rate limited: {e}",
-            type="RateLimitError",
-        )
-    except openai.APIStatusError as e:
-        if e.status_code >= 500:
+        except openai.AuthenticationError as e:
             raise ApplicationError(
-                f"OpenAI server error ({e.status_code}): {e}",
-                type="ServerError",
+                f"Invalid API key: {e}",
+                type="AuthenticationError",
+                non_retryable=True,
             )
-        raise ApplicationError(
-            f"OpenAI client error ({e.status_code}): {e}",
-            type="ClientError",
-            non_retryable=True,
-        )
-    except openai.APIConnectionError as e:
-        raise ApplicationError(
-            f"Connection error: {e}",
-            type="ConnectionError",
-        )
+        except openai.RateLimitError as e:
+            raise ApplicationError(
+                f"Rate limited: {e}",
+                type="RateLimitError",
+            )
+        except openai.APIStatusError as e:
+            if e.status_code >= 500:
+                raise ApplicationError(
+                    f"OpenAI server error ({e.status_code}): {e}",
+                    type="ServerError",
+                )
+            raise ApplicationError(
+                f"OpenAI client error ({e.status_code}): {e}",
+                type="ClientError",
+                non_retryable=True,
+            )
+        except openai.APIConnectionError as e:
+            raise ApplicationError(
+                f"Connection error: {e}",
+                type="ConnectionError",
+            )
 
-    # Close thinking if still open
-    if thinking_active:
-        batcher.add(_make_event("THINKING_COMPLETE", content=thinking_buffer))
+        # Close thinking if still open
+        if thinking_active:
+            pubsub.publish(EVENTS_TOPIC, _make_event("THINKING_COMPLETE", content=thinking_buffer))
 
-    # Text was streamed incrementally as TEXT_DELTA. Emit completion.
-    if text_buffer:
-        batcher.add(_make_event("TEXT_COMPLETE", text=text_buffer))
+        # Text was streamed incrementally as TEXT_DELTA. Emit completion.
+        if text_buffer:
+            pubsub.publish(EVENTS_TOPIC, _make_event("TEXT_COMPLETE", text=text_buffer))
 
-    # Final flush
-    await batcher.flush()
+        # Context manager exit flushes remaining buffer
 
     # Build tool call info
     parsed_tool_calls = []
@@ -344,20 +322,20 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
 async def execute_tool(input: ToolInput) -> ToolResult:
     """Execute a tool and return its result.
 
-    For retry scenarios, signals a RETRY event before re-executing.
+    For retry scenarios, publishes a RETRY event before re-executing.
     """
-    batcher = await _get_batcher()
     info = activity.info()
 
     # Retry detection
     if info.attempt > 1:
-        batcher.add(_make_event(
-            "RETRY",
-            operation_id=input.operation_id,
-            attempt=info.attempt,
-            message=f"Retrying {input.tool_name}...",
-        ))
-        await batcher.flush()
+        pubsub = activity_pubsub_client()
+        async with pubsub:
+            pubsub.publish(EVENTS_TOPIC, _make_event(
+                "RETRY",
+                operation_id=input.operation_id,
+                attempt=info.attempt,
+                message=f"Retrying {input.tool_name}...",
+            ), priority=True)
 
     working_dir = Path(input.working_dir)
     result = await _run_tool(input.tool_name, input.arguments, working_dir)

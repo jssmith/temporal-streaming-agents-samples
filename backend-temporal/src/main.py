@@ -1,6 +1,5 @@
 """FastAPI proxy for the Temporal-backed analytics agent."""
 
-import asyncio
 import json
 import logging
 import os
@@ -14,9 +13,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.contrib.pubsub import PubSubClient
 
 from .types import (
-    PollEventsInput,
     SessionInfo,
     StartTurnInput,
     WorkflowState,
@@ -27,6 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TASK_QUEUE = "analytics-agent"
+EVENTS_TOPIC = "events"
 # Max poll rate for execute_update calls to the workflow.
 # Caps how often the BFF polls Temporal, reducing action costs on Temporal Cloud.
 MIN_POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "0.5"))
@@ -90,7 +90,6 @@ class SessionSummary(BaseModel):
 
 class SessionMessages(BaseModel):
     messages: list[dict]
-    events: list[dict]
     turn_in_progress: bool = False
 
 
@@ -121,12 +120,12 @@ async def create_session():
 async def list_sessions():
     client = await get_client()
     results = []
-    async for workflow in client.list_workflows(
+    async for wf in client.list_workflows(
         'WorkflowType="AnalyticsWorkflow"'
     ):
-        if workflow.status == WorkflowExecutionStatus.RUNNING:
+        if wf.status == WorkflowExecutionStatus.RUNNING:
             try:
-                handle = client.get_workflow_handle(workflow.id)
+                handle = client.get_workflow_handle(wf.id)
                 info: SessionInfo = await handle.query(
                     AnalyticsWorkflow.get_session
                 )
@@ -141,7 +140,7 @@ async def list_sessions():
                     preview=preview,
                 ))
             except Exception:
-                logger.exception("Failed to query workflow %s", workflow.id)
+                logger.exception("Failed to query workflow %s", wf.id)
     return results
 
 
@@ -155,7 +154,6 @@ async def get_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     return SessionMessages(
         messages=info.messages,
-        events=info.events,
         turn_in_progress=info.turn_in_progress,
     )
 
@@ -173,8 +171,9 @@ async def run_session(session_id: str, request: RunRequest):
     if desc.status != WorkflowExecutionStatus.RUNNING:
         raise HTTPException(status_code=404, detail="Session not running")
 
-    # Get current event count
-    start_index: int = await handle.query(AnalyticsWorkflow.get_event_count)
+    # Get current pub/sub offset
+    pubsub = PubSubClient(handle)
+    start_offset = await pubsub.get_offset()
 
     # Fire-and-forget: enqueue the user message
     await handle.signal(
@@ -183,31 +182,13 @@ async def run_session(session_id: str, request: RunRequest):
     )
 
     async def event_stream():
-        last_index = start_index
-
-        while True:
-            try:
-                result = await handle.execute_update(
-                    AnalyticsWorkflow.poll_events,
-                    PollEventsInput(last_seen_index=last_index),
-                )
-            except Exception:
-                logger.exception("poll_events failed")
-                error_event = {
-                    "type": "ERROR",
-                    "timestamp": "",
-                    "data": {"message": "poll_events failed"},
-                }
-                yield f"data: {json.dumps(error_event)}\n\n"
+        async for item in pubsub.subscribe(
+            topics=[EVENTS_TOPIC], from_offset=start_offset
+        ):
+            event = json.loads(item.data)
+            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("type") == "AGENT_COMPLETE":
                 return
-
-            for event in result.events:
-                yield f"data: {json.dumps(event)}\n\n"
-                last_index += 1
-
-            if result.turn_complete:
-                return
-            await asyncio.sleep(MIN_POLL_INTERVAL)
 
     return StreamingResponse(
         event_stream(),
@@ -248,33 +229,16 @@ async def stream_events(session_id: str, from_index: int = 0):
     """Resume streaming events for an in-progress turn."""
     client = await get_client()
     handle = client.get_workflow_handle(session_id)
+    pubsub = PubSubClient(handle)
 
     async def event_stream():
-        last_index = from_index
-
-        while True:
-            try:
-                result = await handle.execute_update(
-                    AnalyticsWorkflow.poll_events,
-                    PollEventsInput(last_seen_index=last_index),
-                )
-            except Exception:
-                logger.exception("poll_events failed")
-                error_event = {
-                    "type": "ERROR",
-                    "timestamp": "",
-                    "data": {"message": "poll_events failed"},
-                }
-                yield f"data: {json.dumps(error_event)}\n\n"
+        async for item in pubsub.subscribe(
+            topics=[EVENTS_TOPIC], from_offset=from_index
+        ):
+            event = json.loads(item.data)
+            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("type") == "AGENT_COMPLETE":
                 return
-
-            for event in result.events:
-                yield f"data: {json.dumps(event)}\n\n"
-                last_index += 1
-
-            if result.turn_complete:
-                return
-            await asyncio.sleep(MIN_POLL_INTERVAL)
 
     return StreamingResponse(
         event_stream(),

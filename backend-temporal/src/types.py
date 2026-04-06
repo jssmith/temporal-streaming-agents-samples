@@ -1,5 +1,7 @@
 """Shared Pydantic models for the workflow contract."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -10,9 +12,9 @@ class WorkflowState(BaseModel):
     """Workflow input and continue-as-new state."""
     working_dir: str
     messages: list[dict] = []
-    event_list: list[dict] = []
     response_id: str | None = None
     db_schema: str | None = None
+    pubsub_state: Any = None  # PubSubState, serialized via data converter
 
 
 # -- Workflow signals --
@@ -22,30 +24,12 @@ class StartTurnInput(BaseModel):
     message: str
 
 
-class ActivityEventsInput(BaseModel):
-    """Signal from activity -> workflow with batched events."""
-    events: list[dict]
-
-
-# -- Workflow update --
-
-
-class PollEventsInput(BaseModel):
-    last_seen_index: int
-
-
-class PollEventsResult(BaseModel):
-    events: list[dict]
-    turn_complete: bool
-
-
 # -- Workflow query --
 
 
 class SessionInfo(BaseModel):
     session_id: str
     messages: list[dict]
-    events: list[dict] = []
     turn_in_progress: bool = False
 
 
