@@ -1,5 +1,6 @@
 """FastAPI proxy for the Temporal-backed analytics agent."""
 
+import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -180,8 +181,9 @@ async def run_session(session_id: str, request: RunRequest):
         async for item in pubsub.subscribe(
             topics=[EVENTS_TOPIC], from_offset=start_offset
         ):
-            yield f"data: {item.data.decode()}\n\n"
-            if b'"AGENT_COMPLETE"' in item.data:
+            event = json.loads(item.data)
+            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("type") == "AGENT_COMPLETE":
                 return
 
     return StreamingResponse(
@@ -228,8 +230,9 @@ async def stream_events(session_id: str, from_index: int = 0):
         async for item in pubsub.subscribe(
             topics=[EVENTS_TOPIC], from_offset=from_index
         ):
-            yield f"data: {item.data.decode()}\n\n"
-            if b'"AGENT_COMPLETE"' in item.data:
+            event = json.loads(item.data)
+            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("type") == "AGENT_COMPLETE":
                 return
 
     return StreamingResponse(
