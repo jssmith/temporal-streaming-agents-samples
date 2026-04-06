@@ -12,6 +12,7 @@ from temporalio.contrib.pubsub import PubSubMixin
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
+    from .constants import EVENTS_TOPIC
     from .types import (
         ModelCallInput,
         ModelCallResult,
@@ -25,7 +26,6 @@ with workflow.unsafe.imports_passed_through():
 logger = workflow.logger
 
 MODEL = "gpt-4.1"
-EVENTS_TOPIC = "events"
 
 SYSTEM_PROMPT_TEMPLATE = """You are an analytics assistant with access to a Chinook music store database (SQLite).
 

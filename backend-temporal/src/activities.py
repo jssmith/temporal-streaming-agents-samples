@@ -14,6 +14,7 @@ from temporalio.contrib.pubsub import activity_pubsub_client
 from temporalio.exceptions import ApplicationError
 
 from .database import get_connection, get_db_path, load_schema as _load_schema
+from .constants import EVENTS_TOPIC
 from .types import (
     ModelCallInput,
     ModelCallResult,
@@ -138,9 +139,6 @@ async def _run_tool(tool_name: str, arguments: dict, working_dir: Path) -> dict:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-EVENTS_TOPIC = "events"
 
 
 def _make_event(event_type: str, **data) -> bytes:

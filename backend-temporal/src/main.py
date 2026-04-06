@@ -1,8 +1,6 @@
 """FastAPI proxy for the Temporal-backed analytics agent."""
 
-import json
 import logging
-import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,6 +13,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.contrib.pubsub import PubSubClient
 
+from .constants import EVENTS_TOPIC
 from .types import (
     SessionInfo,
     StartTurnInput,
@@ -26,10 +25,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TASK_QUEUE = "analytics-agent"
-EVENTS_TOPIC = "events"
-# Max poll rate for execute_update calls to the workflow.
-# Caps how often the BFF polls Temporal, reducing action costs on Temporal Cloud.
-MIN_POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "0.5"))
 SESSIONS_DIR = Path(__file__).parent.parent.parent / "sessions"
 
 _client: Client | None = None
@@ -185,9 +180,8 @@ async def run_session(session_id: str, request: RunRequest):
         async for item in pubsub.subscribe(
             topics=[EVENTS_TOPIC], from_offset=start_offset
         ):
-            event = json.loads(item.data)
-            yield f"data: {json.dumps(event)}\n\n"
-            if event.get("type") == "AGENT_COMPLETE":
+            yield f"data: {item.data.decode()}\n\n"
+            if b'"AGENT_COMPLETE"' in item.data:
                 return
 
     return StreamingResponse(
@@ -235,9 +229,8 @@ async def stream_events(session_id: str, from_index: int = 0):
         async for item in pubsub.subscribe(
             topics=[EVENTS_TOPIC], from_offset=from_index
         ):
-            event = json.loads(item.data)
-            yield f"data: {json.dumps(event)}\n\n"
-            if event.get("type") == "AGENT_COMPLETE":
+            yield f"data: {item.data.decode()}\n\n"
+            if b'"AGENT_COMPLETE"' in item.data:
                 return
 
     return StreamingResponse(
