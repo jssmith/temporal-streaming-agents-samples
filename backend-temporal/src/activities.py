@@ -10,7 +10,7 @@ from pathlib import Path
 
 import openai
 from temporalio import activity
-from temporalio.contrib.pubsub import activity_pubsub_client
+from temporalio.contrib.pubsub import PubSubClient
 from temporalio.exceptions import ApplicationError
 
 from .database import get_connection, get_db_path, load_schema as _load_schema
@@ -168,7 +168,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     workflow via PubSubClient. Returns structural data (response_id,
     tool_calls, final_text).
     """
-    pubsub = activity_pubsub_client(batch_interval=2.0)
+    pubsub = PubSubClient.create(batch_interval=2.0)
     info = activity.info()
 
     async with pubsub:
@@ -326,7 +326,7 @@ async def execute_tool(input: ToolInput) -> ToolResult:
 
     # Retry detection
     if info.attempt > 1:
-        pubsub = activity_pubsub_client()
+        pubsub = PubSubClient.create()
         async with pubsub:
             pubsub.publish(EVENTS_TOPIC, _make_event(
                 "RETRY",
