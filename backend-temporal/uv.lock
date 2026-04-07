@@ -1,6 +1,10 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
+
+[options]
+exclude-newer = "2026-03-30T04:04:13.531318Z"
+exclude-newer-span = "P7D"
 
 [[package]]
 name = "analytics-agent-backend-temporal"
@@ -29,7 +33,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.2" },
-    { name = "temporalio", specifier = ">=1.11.0" },
+    { name = "temporalio", editable = "../../sdk-python" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 provides-extras = ["test"]
@@ -274,14 +278,14 @@ wheels = [
 
 [[package]]
 name = "nexus-rpc"
-version = "1.3.0"
+version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2e/f2/d54f5c03d8f4672ccc0875787a385f53dcb61f98a8ae594b5620e85b9cb3/nexus_rpc-1.3.0.tar.gz", hash = "sha256:e56d3b57b60d707ce7a72f83f23f106b86eca1043aa658e44582ab5ff30ab9ad", size = 75650, upload-time = "2025-12-08T22:59:13.002Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/35/d5/cd1ffb202b76ebc1b33c1332a3416e55a39929006982adc2b1eb069aaa9b/nexus_rpc-1.4.0.tar.gz", hash = "sha256:3b8b373d4865671789cc43623e3dc0bcbf192562e40e13727e17f1c149050fba", size = 82367, upload-time = "2026-02-25T22:01:34.053Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d6/74/0afd841de3199c148146c1d43b4bfb5605b2f1dc4c9a9087fe395091ea5a/nexus_rpc-1.3.0-py3-none-any.whl", hash = "sha256:aee0707b4861b22d8124ecb3f27d62dafbe8777dc50c66c91e49c006f971b92d", size = 28873, upload-time = "2025-12-08T22:59:12.024Z" },
+    { url = "https://files.pythonhosted.org/packages/11/52/6327a5f4fda01207205038a106a99848a41c83e933cd23ea2cab3d2ebc6c/nexus_rpc-1.4.0-py3-none-any.whl", hash = "sha256:14c953d3519113f8ccec533a9efdb6b10c28afef75d11cdd6d422640c40b3a49", size = 29645, upload-time = "2026-02-25T22:01:33.122Z" },
 ]
 
 [[package]]
@@ -551,21 +555,62 @@ wheels = [
 
 [[package]]
 name = "temporalio"
-version = "1.23.0"
-source = { registry = "https://pypi.org/simple" }
+version = "1.24.0"
+source = { editable = "../../sdk-python" }
 dependencies = [
     { name = "nexus-rpc" },
     { name = "protobuf" },
     { name = "types-protobuf" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/67/48/ba7413e2fab8dcd277b9df00bafa572da24e9ca32de2f38d428dc3a2825c/temporalio-1.23.0.tar.gz", hash = "sha256:72750494b00eb73ded9db76195e3a9b53ff548780f73d878ec3f807ee3191410", size = 1933051, upload-time = "2026-02-18T17:48:22.353Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6f/71/26c8f21dca9092201b3b9cb7aff42460b4864b5999aa4c6a4343ac66f1fd/temporalio-1.23.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:6b69ac8d75f2d90e66f4edce4316f6a33badc4a30b22efc50e9eddaa9acdc216", size = 12311037, upload-time = "2026-02-18T17:47:47.628Z" },
-    { url = "https://files.pythonhosted.org/packages/ec/47/43102816139f2d346680cb7cc1e53da5f6968355ac65b4d35d4edbfca896/temporalio-1.23.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:1bbbb2f9c3cdd09451565163f6d741e51f109694c49435d475fdfa42b597219d", size = 11821906, upload-time = "2026-02-18T17:47:55.314Z" },
-    { url = "https://files.pythonhosted.org/packages/00/b0/899ff28464a0e17adf17476bdfac8faf4ea41870358ff2d14737e43f9e66/temporalio-1.23.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:cf6570e0ee696f99a38d855da4441a890c7187357c16505ed458ac9ef274ed70", size = 12063601, upload-time = "2026-02-18T17:48:03.994Z" },
-    { url = "https://files.pythonhosted.org/packages/ed/17/b8c6d2ec3e113c6a788322513a5ff635bdd54b3791d092ed0e273467748a/temporalio-1.23.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b82d6cca54c9f376b50e941dd10d12f7fe5b692a314fb087be72cd2898646a79", size = 12394579, upload-time = "2026-02-18T17:48:11.65Z" },
-    { url = "https://files.pythonhosted.org/packages/b4/b7/f9ef7fd5ee65aef7d59ab1e95cb1b45df2fe49c17e3aa4d650ae3322f015/temporalio-1.23.0-cp310-abi3-win_amd64.whl", hash = "sha256:43c3b99a46dd329761a256f3855710c4a5b322afc879785e468bdd0b94faace6", size = 12834494, upload-time = "2026-02-18T17:48:19.071Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "aioboto3", marker = "extra == 'aioboto3'", specifier = ">=10.4.0" },
+    { name = "google-adk", marker = "extra == 'google-adk'", specifier = ">=1.27.0,<2" },
+    { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.48.2,<2" },
+    { name = "mcp", marker = "extra == 'openai-agents'", specifier = ">=1.9.4,<2" },
+    { name = "nexus-rpc", specifier = "==1.4.0" },
+    { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.3,<0.7" },
+    { name = "opentelemetry-api", marker = "extra == 'opentelemetry'", specifier = ">=1.11.1,<2" },
+    { name = "opentelemetry-sdk", marker = "extra == 'opentelemetry'", specifier = ">=1.11.1,<2" },
+    { name = "protobuf", specifier = ">=3.20,<7.0.0" },
+    { name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.0.0,<3" },
+    { name = "python-dateutil", marker = "python_full_version < '3.11'", specifier = ">=2.8.2,<3" },
+    { name = "types-aioboto3", extras = ["s3"], marker = "extra == 'aioboto3'", specifier = ">=10.4.0" },
+    { name = "types-protobuf", specifier = ">=3.20,<7.0.0" },
+    { name = "typing-extensions", specifier = ">=4.2.0,<5" },
+]
+provides-extras = ["grpc", "opentelemetry", "pydantic", "openai-agents", "google-adk", "aioboto3"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "basedpyright", specifier = "==1.34.0" },
+    { name = "cibuildwheel", specifier = ">=2.22.0,<3" },
+    { name = "googleapis-common-protos", specifier = "==1.70.0" },
+    { name = "grpcio-tools", specifier = ">=1.48.2,<2" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "maturin", specifier = ">=1.8.2" },
+    { name = "moto", extras = ["s3", "server"], specifier = ">=5" },
+    { name = "mypy", specifier = "==1.18.2" },
+    { name = "mypy-protobuf", specifier = ">=3.3.0,<4" },
+    { name = "openai-agents", marker = "python_full_version >= '3.14'", specifier = ">=0.3,<0.7" },
+    { name = "openai-agents", extras = ["litellm"], marker = "python_full_version < '3.14'", specifier = ">=0.3,<0.7" },
+    { name = "openinference-instrumentation-google-adk", specifier = ">=0.1.8" },
+    { name = "openinference-instrumentation-openai-agents", specifier = ">=0.1.0" },
+    { name = "psutil", specifier = ">=5.9.3,<6" },
+    { name = "pydocstyle", specifier = ">=6.3.0,<7" },
+    { name = "pydoctor", specifier = ">=25.10.1,<26" },
+    { name = "pyright", specifier = "==1.1.403" },
+    { name = "pytest", specifier = "~=7.4" },
+    { name = "pytest-asyncio", specifier = ">=0.21,<0.22" },
+    { name = "pytest-cov", specifier = ">=6.1.1" },
+    { name = "pytest-pretty", specifier = ">=1.3.0" },
+    { name = "pytest-rerunfailures", specifier = ">=16.1" },
+    { name = "pytest-timeout", specifier = "~=2.2" },
+    { name = "ruff", specifier = ">=0.5.0,<0.6" },
+    { name = "toml", specifier = ">=0.10.2,<0.11" },
+    { name = "twine", specifier = ">=4.0.1,<5" },
 ]
 
 [[package]]
