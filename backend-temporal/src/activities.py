@@ -18,6 +18,7 @@ from .constants import EVENTS_TOPIC
 from .types import (
     ModelCallInput,
     ModelCallResult,
+    TokenUsage,
     ToolCallInfo,
     ToolInput,
     ToolResult,
@@ -168,7 +169,8 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     workflow via PubSubClient. Returns structural data (response_id,
     tool_calls, final_text).
     """
-    pubsub = PubSubClient.create(batch_interval=2.0)
+    batch_interval = float(os.environ.get("PUBSUB_BATCH_INTERVAL", "2.0"))
+    pubsub = PubSubClient.create(batch_interval=batch_interval)
     info = activity.info()
 
     async with pubsub:
@@ -189,6 +191,8 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
             "input": input.input_messages,
             "store": True,
         }
+        if input.reasoning_effort:
+            kwargs["reasoning"] = {"effort": input.reasoning_effort}
         if input.previous_response_id:
             kwargs["previous_response_id"] = input.previous_response_id
 
@@ -197,6 +201,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
         thinking_buffer = ""
         thinking_active = False
         response_id = ""
+        token_usage: TokenUsage | None = None
 
         try:
             async with oai_client.responses.stream(**kwargs) as stream:
@@ -256,6 +261,14 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                     elif event_type == "response.completed":
                         response = event.response
                         response_id = response.id
+                        if response.usage:
+                            u = response.usage
+                            token_usage = TokenUsage(
+                                input_tokens=u.input_tokens,
+                                output_tokens=u.output_tokens,
+                                reasoning_tokens=getattr(u.output_tokens_details, "reasoning_tokens", 0) or 0,
+                                cached_tokens=getattr(u.input_tokens_details, "cached_tokens", 0) or 0,
+                            )
 
         except openai.AuthenticationError as e:
             raise ApplicationError(
@@ -313,6 +326,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
         response_id=response_id,
         tool_calls=parsed_tool_calls,
         final_text=text_buffer if not tool_calls else None,
+        usage=token_usage,
     )
 
 

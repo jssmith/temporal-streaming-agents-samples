@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -102,9 +103,16 @@ async def create_session():
     working_dir = SESSIONS_DIR / session_id
     working_dir.mkdir(parents=True, exist_ok=True)
 
+    model = os.environ.get("AGENT_MODEL", "gpt-5.4-mini")
+    reasoning_effort = os.environ.get("AGENT_REASONING_EFFORT") or None
+
     await client.start_workflow(
         AnalyticsWorkflow.run,
-        WorkflowState(working_dir=str(working_dir)),
+        WorkflowState(
+            working_dir=str(working_dir),
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ),
         id=session_id,
         task_queue=TASK_QUEUE,
     )

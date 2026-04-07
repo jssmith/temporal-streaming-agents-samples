@@ -25,8 +25,6 @@ with workflow.unsafe.imports_passed_through():
 
 logger = workflow.logger
 
-MODEL = "gpt-4.1"
-
 SYSTEM_PROMPT_TEMPLATE = """You are an analytics assistant with access to a Chinook music store database (SQLite).
 
 You have three tools:
@@ -125,6 +123,8 @@ class AnalyticsWorkflow(PubSubMixin):
         self._response_id: str | None = state.response_id
         self._working_dir: str = state.working_dir
         self._schema: str | None = state.db_schema
+        self._model: str = state.model
+        self._reasoning_effort: str | None = state.reasoning_effort
 
     # -- helpers --
 
@@ -199,6 +199,8 @@ class AnalyticsWorkflow(PubSubMixin):
                 await workflow.wait_condition(workflow.all_handlers_finished)
                 workflow.continue_as_new(args=[WorkflowState(
                     working_dir=self._working_dir,
+                    model=self._model,
+                    reasoning_effort=self._reasoning_effort,
                     messages=self._messages,
                     response_id=self._response_id,
                     db_schema=self._schema,
@@ -234,16 +236,18 @@ class AnalyticsWorkflow(PubSubMixin):
                     input_messages=tool_outputs_for_next_call,
                     previous_response_id=self._response_id,
                     tools=TOOL_DEFINITIONS,
-                    model=MODEL,
+                    model=self._model,
                     operation_id=operation_id,
+                    reasoning_effort=self._reasoning_effort,
                 )
             else:
                 call_input = ModelCallInput(
                     input_messages=input_messages,
                     previous_response_id=self._response_id,
                     tools=TOOL_DEFINITIONS,
-                    model=MODEL,
+                    model=self._model,
                     operation_id=operation_id,
+                    reasoning_effort=self._reasoning_effort,
                 )
 
             model_task = asyncio.create_task(
@@ -273,6 +277,15 @@ class AnalyticsWorkflow(PubSubMixin):
             model_result: ModelCallResult = model_task.result()
 
             self._response_id = model_result.response_id
+
+            if model_result.usage:
+                self._emit(
+                    "TOKEN_USAGE",
+                    input_tokens=model_result.usage.input_tokens,
+                    output_tokens=model_result.usage.output_tokens,
+                    reasoning_tokens=model_result.usage.reasoning_tokens,
+                    cached_tokens=model_result.usage.cached_tokens,
+                )
 
             if not model_result.tool_calls:
                 if model_result.final_text:

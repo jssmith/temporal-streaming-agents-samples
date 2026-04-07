@@ -84,7 +84,7 @@ async def run_agent_turn(
 
     while True:
         kwargs: dict = {
-            "model": "gpt-4.1",
+            "model": "gpt-5.4-mini",
             "tools": TOOL_DEFINITIONS,
             "store": True,
         }

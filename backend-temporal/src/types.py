@@ -10,6 +10,8 @@ from temporalio.contrib.pubsub import PubSubState
 class WorkflowState(BaseModel):
     """Workflow input and continue-as-new state."""
     working_dir: str
+    model: str = "gpt-5.4"
+    reasoning_effort: str | None = "medium"
     messages: list[dict] = []
     response_id: str | None = None
     db_schema: str | None = None
@@ -41,12 +43,21 @@ class ModelCallInput(BaseModel):
     tools: list[dict]
     model: str
     operation_id: str
+    reasoning_effort: str | None = None
+
+
+class TokenUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
 
 
 class ModelCallResult(BaseModel):
     response_id: str
     tool_calls: list["ToolCallInfo"]
     final_text: str | None = None
+    usage: TokenUsage | None = None
 
 
 class ToolCallInfo(BaseModel):
