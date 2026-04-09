@@ -62,9 +62,9 @@ work and session state is lost.
 ```mermaid
 flowchart LR
     B[Browser] -->|SSE| BFF[BFF]
-    BFF -->|"Update (long-poll)"| W[Workflow]
+    BFF -->|"subscribe (long-poll Update)"| W[Workflow]
     W -->|Activity| Y[LLM Activity]
-    Y -->|"Signal (batched events)"| W
+    Y -->|"publish (batched Signal)"| W
     Y -->|stream| LLM[LLM]
 ```
 
@@ -72,15 +72,21 @@ The BFF becomes a stateless proxy. Session state, conversation history, and
 the event stream all live in the workflow. The BFF can be restarted at any time
 without losing work.
 
-There are two streaming transport problems to solve:
+The streaming transport uses `temporalio.contrib.pubsub` — a reusable module
+that handles batched publishing from activities, durable storage in the
+workflow, and long-poll subscription from external clients. There are two
+directions:
 
-1. **Activity → Workflow**: How does the LLM activity send streaming events
-   (tokens, thinking, tool calls) back to the workflow while the activity is
-   still running?
-2. **Workflow → BFF**: How does the BFF receive those events from the workflow
-   to forward as SSE to the browser?
+1. **Activity → Workflow (publish)**: The activity publishes streaming events
+   (thinking deltas, text deltas, retries) via `PubSubClient`. Events are
+   batched and flushed to the workflow via Signal at a configurable interval.
+   The workflow itself publishes lifecycle events (tool calls, agent
+   start/complete, token usage) directly via `self.publish()`.
+2. **Workflow → BFF (subscribe)**: The BFF subscribes via `PubSubClient`,
+   which long-polls the workflow using Updates. The Update handler blocks with
+   `wait_condition` until new events are available.
 
-### Transport: Activity → Workflow (Batched Signals)
+### Transport: Activity → Workflow (Pub/Sub)
 
 ```mermaid
 flowchart LR
@@ -91,81 +97,56 @@ flowchart LR
 The LLM activity streams the model response using the OpenAI Responses API
 (`openai.responses.stream()`). The pattern generalizes to any LLM provider
 with a streaming API. As events arrive, the activity translates them into
-application events and buffers them. A background timer flushes the buffer to
-the workflow via a Temporal Signal at a configurable interval (default:
-2 seconds).
+application events and publishes them through `PubSubClient` from
+`temporalio.contrib.pubsub`. The client batches events and flushes them to
+the workflow via Signal at a configurable interval (default: 2 seconds).
 
 This is a Nagle-like batching strategy: buffer events, flush on a timer. The
-activity can also flush immediately for significant events (e.g., end of a
-thinking block).
-
-```python
-class EventBatcher:
-    """Buffers events and flushes to the workflow via Signal."""
-
-    def __init__(self, handle, signal_name, interval=2.0):
-        self._handle = handle
-        self._signal_name = signal_name
-        self._interval = interval
-        self._buffer: list[dict] = []
-
-    def add(self, event: dict):
-        self._buffer.append(event)
-
-    async def flush(self):
-        if self._buffer:
-            batch = self._buffer.copy()
-            self._buffer.clear()
-            await self._handle.signal(self._signal_name, ActivityEventsInput(events=batch))
-
-    async def run_flusher(self):
-        while True:
-            await asyncio.sleep(self._interval)
-            await self.flush()
-```
-
-The activity runs the stream reader and the timer flusher as concurrent tasks:
+client can also flush immediately for priority events (e.g., end of a thinking
+block).
 
 ```python
 @activity.defn
 async def model_call(input: ModelCallInput) -> ModelCallResult:
-    batcher = EventBatcher(workflow_handle, "receive_events", interval=2.0)
+    pubsub = PubSubClient.create(batch_interval=2.0)
 
-    async def read_stream():
+    async with pubsub:
         async with openai_client.responses.stream(**kwargs) as stream:
             async for event in stream:
                 activity.heartbeat()
-                batcher.add(translate(event))
-
-    # Run stream + timer concurrently; cancel timer when stream completes
-    completed, pending = await asyncio.wait(
-        [asyncio.create_task(read_stream()),
-         asyncio.create_task(batcher.run_flusher())],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-    await batcher.flush()  # final flush
+                pubsub.publish(EVENTS_TOPIC, translate(event))
+                # Priority flush for significant events
+                if is_thinking_complete(event):
+                    pubsub.publish(EVENTS_TOPIC, payload, priority=True)
 
     return ModelCallResult(...)
 ```
 
-The workflow receives batched events via a Signal handler and appends them to
-its durable event list:
+The `async with pubsub` context manager starts the background flush timer and
+guarantees a final flush on exit — no manual `asyncio.wait()` or cancellation
+logic needed.
+
+The workflow extends `PubSubMixin`, which provides the Signal handler, Update
+handler, and Query handler for the event stream:
 
 ```python
-@workflow.signal
-def receive_events(self, input: ActivityEventsInput) -> None:
-    self._event_list.extend(input.events)
+@workflow.defn
+class AnalyticsWorkflow(PubSubMixin):
+    @workflow.init
+    def __init__(self, state: WorkflowState) -> None:
+        self.init_pubsub(prior_state=state.pubsub_state)
 ```
 
-**Why Signals?** Signals are fire-and-forget — the activity does not block
-waiting for a response. They are delivered reliably by Temporal and processed
-in order. The batching amortizes the cost: at 2-second intervals, a typical
-model call generates 3-5 signal deliveries rather than hundreds of individual
-token events.
+The workflow publishes events directly too (for events that originate in the
+workflow, like tool call start/complete):
 
-### Transport: Workflow → BFF (Long-Poll Updates)
+```python
+def _emit(self, event_type: str, **data) -> None:
+    event = {"type": event_type, "timestamp": workflow.now().isoformat(), "data": data}
+    self.publish(EVENTS_TOPIC, json.dumps(event).encode())
+```
+
+### Transport: Workflow → BFF (Pub/Sub Subscribe)
 
 ```mermaid
 flowchart LR
@@ -173,61 +154,36 @@ flowchart LR
     BFF -->|"Update (long-poll)"| W[Workflow]
 ```
 
-The BFF polls the workflow for new events using Temporal Updates. Each poll
-includes the client's `last_seen_index`. The Update handler uses
-`workflow.wait_condition()` to block until new events are available, then
-returns them.
+The BFF subscribes to the workflow's event stream using
+`PubSubClient.subscribe()`, an async iterator that long-polls the workflow via
+Updates internally. Each poll includes the client's current offset. The
+Update handler in `PubSubMixin` uses `workflow.wait_condition()` to block
+until new events are available, then returns them.
 
 ```python
-@workflow.update
-async def poll_events(self, input: PollEventsInput) -> PollEventsResult:
-    await workflow.wait_condition(
-        lambda: len(self._event_list) > input.last_seen_index
-            or self._turn_complete,
-        timeout=300,
-    )
-    return PollEventsResult(
-        events=self._event_list[input.last_seen_index:],
-        turn_complete=self._turn_complete,
-    )
-```
+pubsub = PubSubClient.create(client, session_id)
+start_offset = await pubsub.get_offset()
 
-The BFF converts each batch into SSE and writes to the HTTP response:
-
-```python
 async def event_stream():
-    last_index = start_index
-    while True:
-        result = await handle.execute_update(
-            AnalyticsWorkflow.poll_events,
-            PollEventsInput(last_seen_index=last_index),
-        )
-        for event in result.events:
-            yield f"data: {json.dumps(event)}\n\n"
-            last_index += 1
-        if result.turn_complete:
+    async for item in pubsub.subscribe(
+        topics=[EVENTS_TOPIC], from_offset=start_offset
+    ):
+        event = json.loads(item.data)
+        yield f"data: {json.dumps(event)}\n\n"
+        if event.get("type") == "AGENT_COMPLETE":
             return
 
 return StreamingResponse(event_stream(), media_type="text/event-stream")
 ```
 
-**Why `wait_condition`?** It yields control in the workflow's event loop,
-allowing the main agent loop to continue making progress. When a Signal arrives
-with new events, the condition wakes up, and the Update handler returns the
-batch. This interleaving is what makes long-polling work without dedicated
-pub/sub infrastructure.
-
-**Why not WebSockets?** WebSockets are a viable alternative where the workflow
-pushes to the BFF rather than the BFF pulling. This avoids the overhead of
-repeated Updates but requires the workflow to manage connection state. The
-long-poll approach is simpler and works well for the latencies typical of AI
-agent interactions (seconds, not milliseconds).
+The subscribe iterator handles the poll loop, offset tracking, and
+reconnection internally. The BFF code is a simple async for loop.
 
 ### Concurrency Model
 
-The workflow runs a main loop and handles poll Updates concurrently on a single
-thread. The key insight is that `workflow.wait_condition()` yields, so the main
-loop and poll handlers interleave at each `await` point:
+The workflow runs a main loop and handles pub/sub poll Updates concurrently on
+a single thread. The key insight is that `workflow.wait_condition()` yields, so
+the main loop and poll handlers interleave at each `await` point:
 
 ```mermaid
 sequenceDiagram
@@ -236,7 +192,7 @@ sequenceDiagram
     participant A as LLM Activity
 
     BFF->>W: Signal: start_turn(message)
-    BFF->>W: Update: poll_events(last_seen_index=0)
+    BFF->>W: Update: poll(from_offset=0)
     Note over W: wait_condition blocks<br/>until events available
 
     W->>A: execute_activity(model_call)
@@ -244,45 +200,46 @@ sequenceDiagram
 
     loop streaming
         A->>A: receive LLM stream events
-        A->>W: Signal: receive_events(batch)
-        Note over W: event_list grows,<br/>wait_condition wakes
-        W-->>BFF: poll_events returns new events
-        BFF->>W: Update: poll_events(last_seen_index=N)
+        A->>W: Signal: publish(batch)
+        Note over W: event buffer grows,<br/>wait_condition wakes
+        W-->>BFF: poll returns new events
+        BFF->>W: Update: poll(from_offset=N)
     end
 
     A-->>W: activity completes (tool_calls)
     Note over W: main loop resumes
-    W->>W: emit TOOL_CALL_START
+    W->>W: publish TOOL_CALL_START
 
     W->>A: execute_activity(execute_tool)
     Note over W: main loop yields
     A-->>W: tool result
     Note over W: main loop resumes
-    W->>W: emit TOOL_CALL_COMPLETE
-    W-->>BFF: poll_events returns events
+    W->>W: publish TOOL_CALL_COMPLETE
+    W-->>BFF: poll returns events
 
     Note over W: next model_call or done
 
-    W->>W: emit AGENT_COMPLETE
-    W-->>BFF: poll_events returns (turn_complete=true)
+    W->>W: publish AGENT_COMPLETE
+    W-->>BFF: poll returns final events
 ```
 
 ### Per-Turn Event Indexing
 
-Events use a global index that increments across all turns within a session.
-Before sending the `start_turn` Signal, the BFF queries the current event
-count. The SSE stream starts from that index, ensuring only events from the
+Events use a global offset that increments across all turns within a session.
+Before sending the `start_turn` Signal, the BFF queries the current pub/sub
+offset. The SSE stream starts from that offset, ensuring only events from the
 current turn are sent — not replayed events from prior turns.
 
 ```python
 # BFF: start a turn
-start_index = await handle.query(AnalyticsWorkflow.get_event_count)
+pubsub = PubSubClient.create(client, session_id)
+start_offset = await pubsub.get_offset()
 await handle.signal(AnalyticsWorkflow.start_turn, StartTurnInput(message=text))
-# Poll from start_index onward...
+# Subscribe from start_offset onward...
 ```
 
 On reconnect (even after server restart), the client resumes from its last
-known index. The workflow has all events durably.
+known offset. The workflow has all events durably.
 
 ## Analytics Agent
 
@@ -345,10 +302,10 @@ E2E tests auto-start the ephemeral backend and frontend via Playwright's
 temporal server start-dev
 
 # Terminal 2: Worker
-# Note: this sample uses the OpenAI Responses API with gpt-4.1. A full-access
-# project key works, or a restricted key with Write permission for /v1/responses.
-# Read-only keys will fail. No permissions for Assistants or OpenAI-hosted tools
-# are required.
+# Note: this sample uses the OpenAI Responses API (default model: gpt-5.4-mini).
+# A full-access project key works, or a restricted key with Write permission
+# for /v1/responses. Read-only keys will fail. No permissions for Assistants
+# or OpenAI-hosted tools are required.
 export OPENAI_API_KEY=sk-...
 cd backend-temporal
 uv run python -m src.worker
@@ -390,10 +347,10 @@ same agent with the same frontend but keeps all state in memory.
 
 ```bash
 # Terminal 1: Backend (port 8001)
-# Note: this sample uses the OpenAI Responses API with gpt-4.1. A full-access
-# project key works, or a restricted key with Write permission for /v1/responses.
-# Read-only keys will fail. No permissions for Assistants or OpenAI-hosted tools
-# are required.
+# Note: this sample uses the OpenAI Responses API (default model: gpt-5.4-mini).
+# A full-access project key works, or a restricted key with Write permission
+# for /v1/responses. Read-only keys will fail. No permissions for Assistants
+# or OpenAI-hosted tools are required.
 export OPENAI_API_KEY=sk-...
 cd backend-ephemeral
 uv sync
