@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-03-30T04:04:13.531318Z"
+exclude-newer = "2026-04-02T18:41:29.726897Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -33,7 +33,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.2" },
-    { name = "temporalio", editable = "../../sdk-python" },
+    { name = "temporalio", git = "https://github.com/temporalio/sdk-python.git?branch=contrib%2Fpubsub" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 provides-extras = ["test"]
@@ -556,61 +556,12 @@ wheels = [
 [[package]]
 name = "temporalio"
 version = "1.24.0"
-source = { editable = "../../sdk-python" }
+source = { git = "https://github.com/temporalio/sdk-python.git?branch=contrib%2Fpubsub#a9abc202b1929fdd5bf90a7b341d983cb612dd2f" }
 dependencies = [
     { name = "nexus-rpc" },
     { name = "protobuf" },
     { name = "types-protobuf" },
     { name = "typing-extensions" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aioboto3", marker = "extra == 'aioboto3'", specifier = ">=10.4.0" },
-    { name = "google-adk", marker = "extra == 'google-adk'", specifier = ">=1.27.0,<2" },
-    { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.48.2,<2" },
-    { name = "mcp", marker = "extra == 'openai-agents'", specifier = ">=1.9.4,<2" },
-    { name = "nexus-rpc", specifier = "==1.4.0" },
-    { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.3,<0.7" },
-    { name = "opentelemetry-api", marker = "extra == 'opentelemetry'", specifier = ">=1.11.1,<2" },
-    { name = "opentelemetry-sdk", marker = "extra == 'opentelemetry'", specifier = ">=1.11.1,<2" },
-    { name = "protobuf", specifier = ">=3.20,<7.0.0" },
-    { name = "pydantic", marker = "extra == 'pydantic'", specifier = ">=2.0.0,<3" },
-    { name = "python-dateutil", marker = "python_full_version < '3.11'", specifier = ">=2.8.2,<3" },
-    { name = "types-aioboto3", extras = ["s3"], marker = "extra == 'aioboto3'", specifier = ">=10.4.0" },
-    { name = "types-protobuf", specifier = ">=3.20,<7.0.0" },
-    { name = "typing-extensions", specifier = ">=4.2.0,<5" },
-]
-provides-extras = ["grpc", "opentelemetry", "pydantic", "openai-agents", "google-adk", "aioboto3"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "basedpyright", specifier = "==1.34.0" },
-    { name = "cibuildwheel", specifier = ">=2.22.0,<3" },
-    { name = "googleapis-common-protos", specifier = "==1.70.0" },
-    { name = "grpcio-tools", specifier = ">=1.48.2,<2" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "maturin", specifier = ">=1.8.2" },
-    { name = "moto", extras = ["s3", "server"], specifier = ">=5" },
-    { name = "mypy", specifier = "==1.18.2" },
-    { name = "mypy-protobuf", specifier = ">=3.3.0,<4" },
-    { name = "openai-agents", marker = "python_full_version >= '3.14'", specifier = ">=0.3,<0.7" },
-    { name = "openai-agents", extras = ["litellm"], marker = "python_full_version < '3.14'", specifier = ">=0.3,<0.7" },
-    { name = "openinference-instrumentation-google-adk", specifier = ">=0.1.8" },
-    { name = "openinference-instrumentation-openai-agents", specifier = ">=0.1.0" },
-    { name = "psutil", specifier = ">=5.9.3,<6" },
-    { name = "pydocstyle", specifier = ">=6.3.0,<7" },
-    { name = "pydoctor", specifier = ">=25.10.1,<26" },
-    { name = "pyright", specifier = "==1.1.403" },
-    { name = "pytest", specifier = "~=7.4" },
-    { name = "pytest-asyncio", specifier = ">=0.21,<0.22" },
-    { name = "pytest-cov", specifier = ">=6.1.1" },
-    { name = "pytest-pretty", specifier = ">=1.3.0" },
-    { name = "pytest-rerunfailures", specifier = ">=16.1" },
-    { name = "pytest-timeout", specifier = "~=2.2" },
-    { name = "ruff", specifier = ">=0.5.0,<0.6" },
-    { name = "toml", specifier = ">=0.10.2,<0.11" },
-    { name = "twine", specifier = ">=4.0.1,<5" },
 ]
 
 [[package]]
