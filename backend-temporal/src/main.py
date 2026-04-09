@@ -100,7 +100,7 @@ async def create_session():
     working_dir = SESSIONS_DIR / session_id
     working_dir.mkdir(parents=True, exist_ok=True)
 
-    model = os.environ.get("AGENT_MODEL", "gpt-5.4-mini")
+    model = os.environ.get("AGENT_MODEL", "gpt-5.4")
     reasoning_effort = os.environ.get("AGENT_REASONING_EFFORT") or None
 
     await client.start_workflow(
