@@ -17,3 +17,6 @@ test-results/
 
 # Environment
 .env
+
+# Local uv source overrides
+uv.toml

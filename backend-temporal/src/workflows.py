@@ -8,15 +8,14 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.contrib.pubsub import PubSubMixin
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
+    from .constants import EVENTS_TOPIC
     from .types import (
-        ActivityEventsInput,
         ModelCallInput,
         ModelCallResult,
-        PollEventsInput,
-        PollEventsResult,
         SessionInfo,
         StartTurnInput,
         ToolInput,
@@ -25,8 +24,6 @@ with workflow.unsafe.imports_passed_through():
     )
 
 logger = workflow.logger
-
-MODEL = "gpt-4.1"
 
 SYSTEM_PROMPT_TEMPLATE = """You are an analytics assistant with access to a Chinook music store database (SQLite).
 
@@ -113,12 +110,12 @@ TOOL_DEFINITIONS: list[dict] = [
 
 
 @workflow.defn
-class AnalyticsWorkflow:
+class AnalyticsWorkflow(PubSubMixin):
 
     @workflow.init
     def __init__(self, state: WorkflowState) -> None:
+        self.init_pubsub(prior_state=state.pubsub_state)
         self._messages: list[dict] = state.messages
-        self._event_list: list[dict] = state.event_list
         self._pending_message: str | None = None
         self._turn_complete: bool = True
         self._interrupted: bool = False
@@ -126,6 +123,8 @@ class AnalyticsWorkflow:
         self._response_id: str | None = state.response_id
         self._working_dir: str = state.working_dir
         self._schema: str | None = state.db_schema
+        self._model: str = state.model
+        self._reasoning_effort: str | None = state.reasoning_effort
 
     # -- helpers --
 
@@ -135,7 +134,7 @@ class AnalyticsWorkflow:
             "timestamp": workflow.now().isoformat(),
             "data": data,
         }
-        self._event_list.append(event)
+        self.publish(EVENTS_TOPIC, json.dumps(event).encode())
 
     def _build_system_prompt(self) -> str:
         session_id = workflow.info().workflow_id
@@ -157,37 +156,13 @@ class AnalyticsWorkflow:
     def close_session(self) -> None:
         self._closed = True
 
-    @workflow.signal
-    def receive_events(self, input: ActivityEventsInput) -> None:
-        self._event_list.extend(input.events)
-
-    # -- update (long-poll) --
-
-    @workflow.update
-    async def poll_events(self, input: PollEventsInput) -> PollEventsResult:
-        await workflow.wait_condition(
-            lambda: len(self._event_list) > input.last_seen_index
-            or self._turn_complete,
-            timeout=300,
-        )
-        new_events = self._event_list[input.last_seen_index:]
-        return PollEventsResult(
-            events=new_events,
-            turn_complete=self._turn_complete,
-        )
-
     # -- queries --
-
-    @workflow.query
-    def get_event_count(self) -> int:
-        return len(self._event_list)
 
     @workflow.query
     def get_session(self) -> SessionInfo:
         return SessionInfo(
             session_id=workflow.info().workflow_id,
             messages=self._messages,
-            events=self._event_list,
             turn_in_progress=not self._turn_complete,
         )
 
@@ -220,12 +195,16 @@ class AnalyticsWorkflow:
             self._turn_complete = True
 
             if workflow.info().is_continue_as_new_suggested():
+                self.drain_pubsub()
+                await workflow.wait_condition(workflow.all_handlers_finished)
                 workflow.continue_as_new(args=[WorkflowState(
                     working_dir=self._working_dir,
+                    model=self._model,
+                    reasoning_effort=self._reasoning_effort,
                     messages=self._messages,
-                    event_list=self._event_list,
                     response_id=self._response_id,
                     db_schema=self._schema,
+                    pubsub_state=self.get_pubsub_state(),
                 )])
 
     async def _run_turn(self, message: str) -> None:
@@ -257,16 +236,18 @@ class AnalyticsWorkflow:
                     input_messages=tool_outputs_for_next_call,
                     previous_response_id=self._response_id,
                     tools=TOOL_DEFINITIONS,
-                    model=MODEL,
+                    model=self._model,
                     operation_id=operation_id,
+                    reasoning_effort=self._reasoning_effort,
                 )
             else:
                 call_input = ModelCallInput(
                     input_messages=input_messages,
                     previous_response_id=self._response_id,
                     tools=TOOL_DEFINITIONS,
-                    model=MODEL,
+                    model=self._model,
                     operation_id=operation_id,
+                    reasoning_effort=self._reasoning_effort,
                 )
 
             model_task = asyncio.create_task(
@@ -296,6 +277,15 @@ class AnalyticsWorkflow:
             model_result: ModelCallResult = model_task.result()
 
             self._response_id = model_result.response_id
+
+            if model_result.usage:
+                self._emit(
+                    "TOKEN_USAGE",
+                    input_tokens=model_result.usage.input_tokens,
+                    output_tokens=model_result.usage.output_tokens,
+                    reasoning_tokens=model_result.usage.reasoning_tokens,
+                    cached_tokens=model_result.usage.cached_tokens,
+                )
 
             if not model_result.tool_calls:
                 if model_result.final_text:

@@ -3,10 +3,9 @@
 import asyncio
 import logging
 
-from temporalio.client import Client
-from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
+from . import temporal_client
 from .activities import execute_tool, load_schema, model_call
 from .workflows import AnalyticsWorkflow
 
@@ -15,11 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    client = await Client.connect(
-        "localhost:7233",
-        data_converter=pydantic_data_converter,
-    )
-    logger.info("Connected to Temporal server")
+    client = await temporal_client.connect()
+    logger.info("Connected to Temporal at %s", client.service_client.config.target_host)
 
     worker = Worker(
         client,

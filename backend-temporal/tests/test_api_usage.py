@@ -30,9 +30,12 @@ def test_uses_responses_stream(activities_source: str):
     assert "responses.stream(" in activities_source
 
 
-def test_model_is_gpt_4_1(workflows_source: str):
-    """The configured model must be gpt-4.1."""
-    assert '"gpt-4.1"' in workflows_source
+def test_default_model():
+    """The default model in WorkflowState must be a gpt-5 class model."""
+    from src.types import WorkflowState
+
+    state = WorkflowState(working_dir="/tmp")
+    assert state.model.startswith("gpt-5"), f"Expected gpt-5.x default, got {state.model}"
 
 
 def test_no_openai_hosted_tools():
