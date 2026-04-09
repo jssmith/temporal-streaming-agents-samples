@@ -364,6 +364,25 @@ npm run dev
 
 Open http://localhost:3001
 
+### Running (Temporal Cloud)
+
+To run against Temporal Cloud instead of a local dev server, create a
+`backend-temporal/.env` file:
+
+```bash
+TEMPORAL_ADDRESS=your-namespace.abcd.tmprl.cloud:7233
+TEMPORAL_NAMESPACE=your-namespace.abcd
+TEMPORAL_API_KEY=your-api-key
+OPENAI_API_KEY=sk-...
+```
+
+Then start the worker, API server, and frontend as above — but skip the
+`temporal server start-dev` step. The worker and API server read connection
+settings from the `.env` file automatically.
+
+To create an API key, go to [cloud.temporal.io](https://cloud.temporal.io) →
+profile → **API Keys** → **Create API Key**.
+
 ### Running (Ephemeral Backend)
 
 An ephemeral (non-Temporal) backend is included for comparison. It runs the

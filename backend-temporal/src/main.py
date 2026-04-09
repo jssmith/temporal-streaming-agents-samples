@@ -12,7 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowExecutionStatus
-from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.contrib.pubsub import PubSubClient
 
 from .constants import EVENTS_TOPIC
@@ -21,6 +20,7 @@ from .types import (
     StartTurnInput,
     WorkflowState,
 )
+from . import temporal_client
 from .workflows import AnalyticsWorkflow
 
 logging.basicConfig(level=logging.INFO)
@@ -35,10 +35,7 @@ _client: Client | None = None
 async def get_client() -> Client:
     global _client
     if _client is None:
-        _client = await Client.connect(
-            "localhost:7233",
-            data_converter=pydantic_data_converter,
-        )
+        _client = await temporal_client.connect()
     return _client
 
 
