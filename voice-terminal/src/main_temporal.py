@@ -47,15 +47,18 @@ async def _consume_turn(
     pubsub: PubSubClient,
     player: AudioPlayer,
     from_offset: int,
-) -> None:
+) -> int:
     """Subscribe to pub/sub and process audio + events for one turn.
 
-    Processes items until TURN_COMPLETE or cancellation.
+    Returns the offset past the last consumed item (safe to truncate up to).
     """
+    consumed_offset = from_offset
     async for item in pubsub.subscribe(
         topics=[AUDIO_TOPIC, EVENTS_TOPIC],
         from_offset=from_offset,
     ):
+        consumed_offset = item.offset + 1
+
         if item.topic == AUDIO_TOPIC:
             payload = json.loads(item.data)
             pcm = base64.b64decode(payload["audio_base64"])
@@ -83,27 +86,29 @@ async def _consume_turn(
                 print_response(data.get("text", ""))
 
             elif event_type == "TURN_COMPLETE":
-                return
+                return consumed_offset
+
+    return consumed_offset
 
 
 async def _drain_to_turn_complete(
     pubsub: PubSubClient,
     from_offset: int,
-) -> None:
+) -> int:
     """Drain pub/sub events until TURN_COMPLETE, discarding everything.
 
-    After interruption, the old turn's activity may still be publishing
-    audio chunks. We must advance past the old TURN_COMPLETE before
-    subscribing for the next turn, otherwise the stale TURN_COMPLETE
-    would cause the next subscription to exit immediately.
+    Returns the offset past the last consumed item.
     """
+    consumed_offset = from_offset
     async for item in pubsub.subscribe(
         topics=[EVENTS_TOPIC],
         from_offset=from_offset,
     ):
+        consumed_offset = item.offset + 1
         event = json.loads(item.data)
         if event.get("type") == "TURN_COMPLETE":
-            return
+            return consumed_offset
+    return consumed_offset
 
 
 async def main() -> None:
@@ -136,7 +141,7 @@ async def main() -> None:
     pubsub = PubSubClient.create(client, workflow_id=session_id)
     player = AudioPlayer()
     last_offset = 0
-    drain_task: asyncio.Task[None] | None = None
+    drain_task: asyncio.Task[int] | None = None
 
     try:
         while True:
@@ -155,8 +160,7 @@ async def main() -> None:
             # wait for it to finish before starting the next turn.
             if drain_task is not None:
                 print_status("Waiting for previous turn to finish...")
-                await drain_task
-                last_offset = await pubsub.get_offset()
+                last_offset = await drain_task
                 await handle.signal(
                     VoiceAnalyticsWorkflow.truncate,
                     last_offset,
@@ -191,8 +195,10 @@ async def main() -> None:
                     break
 
             try:
-                await consume_task
+                last_offset = await consume_task
             except asyncio.CancelledError:
+                # subscribe() swallows CancelledError and returns normally,
+                # so this shouldn't happen, but handle it defensively.
                 pass
             except RPCError as e:
                 if e.status == RPCStatusCode.NOT_FOUND:
@@ -208,8 +214,7 @@ async def main() -> None:
                     _drain_to_turn_complete(pubsub, last_offset)
                 )
             else:
-                # Normal completion — advance offset and truncate now.
-                last_offset = await pubsub.get_offset()
+                # Normal completion — truncate up to consumed offset.
                 await handle.signal(
                     VoiceAnalyticsWorkflow.truncate,
                     last_offset,
