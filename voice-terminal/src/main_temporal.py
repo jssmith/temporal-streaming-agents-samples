@@ -23,7 +23,6 @@ from temporalio.service import RPCError, RPCStatusCode
 from .audio import AudioPlayer, print_audio_devices, record_until_silence
 from .display import (
     print_banner,
-    print_interrupted,
     print_listening,
     print_response,
     print_status,
@@ -220,9 +219,12 @@ async def main() -> None:
                     last_offset,
                 )
 
+                # Stop speech detection before waiting for playback to
+                # drain. The turn is complete — if the user starts
+                # speaking now, that's their next question, not an
+                # interruption.
+                player.stop_speech_detection()
                 await player.wait_until_done()
-                if player.speech_detected:
-                    print_interrupted()
 
             player.stop()
 
