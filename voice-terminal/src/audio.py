@@ -8,7 +8,6 @@ import asyncio
 import io
 import logging
 import threading
-import time
 import wave
 
 import numpy as np
@@ -118,24 +117,18 @@ class AudioPlayer:
     Mutes the mic while audio is actively playing to avoid feedback.
     """
 
-    # Seconds to suppress speech detection after speaker output stops,
-    # to avoid picking up residual speaker audio as speech.
-    _OUTPUT_COOLDOWN = 0.3
-
     def __init__(self, sample_rate: int = OUTPUT_SAMPLE_RATE):
         self._sample_rate = sample_rate
         self._buffer = b""
         self._lock = threading.Lock()
         self._playing = False
         self._outputting = False  # True when output callback is producing audio
-        self._output_stopped_at: float = 0.0  # monotonic time when output last stopped
         self._interrupted = False
         self._ever_enqueued = False  # Track whether any audio was ever enqueued
         self._stream: sd.OutputStream | None = None
         # Speech detection for interruption
         self._speech_detected = False
         self._input_stream: sd.InputStream | None = None
-        self._speech_threshold = 0.04  # Higher threshold to avoid feedback
 
     def start(self) -> None:
         """Start the output stream."""
@@ -159,8 +152,6 @@ class AudioPlayer:
                     self._outputting = True
                 else:
                     outdata.fill(0)
-                    if self._outputting:
-                        self._output_stopped_at = time.monotonic()
                     self._outputting = False
 
         self._stream = sd.OutputStream(
@@ -172,30 +163,31 @@ class AudioPlayer:
         )
         self._stream.start()
 
-    def start_speech_detection(self, threshold: float = 0.06) -> None:
-        """Start monitoring mic for speech (used during playback for interruption).
+    def start_speech_detection(
+        self,
+        quiet_threshold: float = 0.06,
+        bargein_threshold: float = 0.15,
+    ) -> None:
+        """Start monitoring mic for speech (barge-in during playback).
 
-        Uses a higher threshold and requires several consecutive loud frames
-        to distinguish real speech from speaker feedback.
+        Uses two thresholds:
+        - quiet_threshold: used when the speaker is silent (between turns
+          or during gaps). Lower because there's no competing audio.
+        - bargein_threshold: used while the speaker is actively outputting.
+          Higher to reject speaker leakage — the user's voice at the mic
+          is louder than the speaker's output picked up by the mic.
+
+        Requires ~150ms (3 frames) of sustained loud input to trigger.
         """
-        self._speech_threshold = threshold
         self._speech_detected = False
         consecutive_loud = 0
-        # Require ~150ms of sustained loud input (not just a brief feedback spike)
         frames_needed = 3
 
         def input_callback(indata: np.ndarray, frames: int, time_info, status):
             nonlocal consecutive_loud
-            # Suppress detection while the speaker is outputting or within
-            # the cooldown period after output stops. This avoids picking
-            # up residual speaker audio (reverb, DAC tail) as speech.
-            if self._outputting or (
-                time.monotonic() - self._output_stopped_at < self._OUTPUT_COOLDOWN
-            ):
-                consecutive_loud = 0
-                return
+            threshold = bargein_threshold if self._outputting else quiet_threshold
             rms = np.sqrt(np.mean(indata[:, 0] ** 2))
-            if rms > self._speech_threshold:
+            if rms > threshold:
                 consecutive_loud += 1
                 if consecutive_loud >= frames_needed:
                     self._speech_detected = True
@@ -253,12 +245,7 @@ class AudioPlayer:
                 if self._interrupted:
                     break
                 if len(self._buffer) == 0 and self._ever_enqueued:
-                    # Buffer drained — wait a tiny bit more for the output
-                    # callback to finish playing the last chunk
                     break
-            if self._speech_detected:
-                self.interrupt()
-                break
             await asyncio.sleep(0.05)
 
         # Small grace period for the last audio chunk to finish playing
