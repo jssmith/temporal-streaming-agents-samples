@@ -178,6 +178,11 @@ class AudioPlayer:
 
         def input_callback(indata: np.ndarray, frames: int, time_info, status):
             nonlocal consecutive_loud
+            # Suppress detection while the speaker is actively outputting
+            # to avoid picking up our own TTS audio as speech.
+            if self._outputting:
+                consecutive_loud = 0
+                return
             rms = np.sqrt(np.mean(indata[:, 0] ** 2))
             if rms > self._speech_threshold:
                 consecutive_loud += 1
