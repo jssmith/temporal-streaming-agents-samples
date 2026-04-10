@@ -18,6 +18,7 @@ import uuid
 from temporalio.client import Client
 from temporalio.contrib.pubsub import PubSubClient
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.service import RPCError, RPCStatusCode
 
 from .audio import AudioPlayer, print_audio_devices, record_until_silence
 from .display import (
@@ -193,6 +194,11 @@ async def main() -> None:
                 await consume_task
             except asyncio.CancelledError:
                 pass
+            except RPCError as e:
+                if e.status == RPCStatusCode.NOT_FOUND:
+                    logger.exception("Workflow completed unexpectedly")
+                    break
+                raise
 
             if interrupted:
                 # The old turn's activity is still running. Drain past
@@ -218,7 +224,13 @@ async def main() -> None:
     finally:
         if drain_task is not None:
             drain_task.cancel()
-        await handle.signal(VoiceAnalyticsWorkflow.close_session)
+        try:
+            await handle.signal(VoiceAnalyticsWorkflow.close_session)
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                logger.info("Workflow already completed")
+            else:
+                raise
         print("\nGoodbye!")
 
 

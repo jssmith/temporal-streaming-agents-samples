@@ -120,6 +120,10 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
             if workflow.info().is_continue_as_new_suggested():
                 self.drain_pubsub()
                 await workflow.wait_condition(workflow.all_handlers_finished)
+                # Truncate entire log before serializing — audio chunks
+                # make the log too large for continue-as-new payloads.
+                end_offset = self._pubsub_base_offset + len(self._pubsub_log)
+                self.truncate_pubsub(end_offset)
                 workflow.continue_as_new(args=[VoiceWorkflowState(
                     messages=self._messages,
                     response_id=self._response_id,
