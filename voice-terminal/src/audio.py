@@ -8,6 +8,7 @@ import asyncio
 import io
 import logging
 import threading
+import time
 import wave
 
 import numpy as np
@@ -117,12 +118,17 @@ class AudioPlayer:
     Mutes the mic while audio is actively playing to avoid feedback.
     """
 
+    # Seconds to suppress speech detection after speaker output stops,
+    # to avoid picking up residual speaker audio as speech.
+    _OUTPUT_COOLDOWN = 0.3
+
     def __init__(self, sample_rate: int = OUTPUT_SAMPLE_RATE):
         self._sample_rate = sample_rate
         self._buffer = b""
         self._lock = threading.Lock()
         self._playing = False
         self._outputting = False  # True when output callback is producing audio
+        self._output_stopped_at: float = 0.0  # monotonic time when output last stopped
         self._interrupted = False
         self._ever_enqueued = False  # Track whether any audio was ever enqueued
         self._stream: sd.OutputStream | None = None
@@ -153,6 +159,8 @@ class AudioPlayer:
                     self._outputting = True
                 else:
                     outdata.fill(0)
+                    if self._outputting:
+                        self._output_stopped_at = time.monotonic()
                     self._outputting = False
 
         self._stream = sd.OutputStream(
@@ -178,9 +186,12 @@ class AudioPlayer:
 
         def input_callback(indata: np.ndarray, frames: int, time_info, status):
             nonlocal consecutive_loud
-            # Suppress detection while the speaker is actively outputting
-            # to avoid picking up our own TTS audio as speech.
-            if self._outputting:
+            # Suppress detection while the speaker is outputting or within
+            # the cooldown period after output stops. This avoids picking
+            # up residual speaker audio (reverb, DAC tail) as speech.
+            if self._outputting or (
+                time.monotonic() - self._output_stopped_at < self._OUTPUT_COOLDOWN
+            ):
                 consecutive_loud = 0
                 return
             rms = np.sqrt(np.mean(indata[:, 0] ** 2))
