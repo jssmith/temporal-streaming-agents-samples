@@ -117,19 +117,11 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
 
             self._turn_active = False
 
-            if workflow.info().is_continue_as_new_suggested():
-                self.drain_pubsub()
-                await workflow.wait_condition(workflow.all_handlers_finished)
-                # Truncate entire log before serializing — audio chunks
-                # make the log too large for continue-as-new payloads.
-                end_offset = self._pubsub_base_offset + len(self._pubsub_log)
-                self.truncate_pubsub(end_offset)
-                workflow.continue_as_new(args=[VoiceWorkflowState(
-                    messages=self._messages,
-                    response_id=self._response_id,
-                    db_schema=self._schema,
-                    pubsub_state=self.get_pubsub_state(),
-                )])
+            # NOTE: continue-as-new is disabled for now. The pub/sub
+            # subscription has in-flight polls that race with truncation
+            # during CAN, causing "offset before base offset" crashes.
+            # Voice sessions are short-lived; CAN can be re-enabled once
+            # the pub/sub mixin handles truncated offsets gracefully.
 
     async def _run_turn(self, audio_b64: str) -> None:
         retry_policy = RetryPolicy(maximum_attempts=3)
