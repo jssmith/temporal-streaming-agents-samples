@@ -131,6 +131,7 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
         retry_policy = RetryPolicy(maximum_attempts=3)
 
         # 1. Transcribe
+        self._emit("STATUS", text="Transcribing...")
         transcript: str = await workflow.execute_activity(
             "transcribe",
             TranscribeInput(audio_base64=audio_b64),
@@ -147,6 +148,7 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
         self._messages.append({"role": "user", "content": transcript})
 
         # 2. Agent loop (model call + tool execution)
+        self._emit("STATUS", text="Thinking...")
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(schema=self._schema)
         input_messages: list[dict] = [{"role": "system", "content": system_prompt}]
         for msg in self._messages:
@@ -156,6 +158,7 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
 
         while not self._interrupted:
             if tool_outputs is not None:
+                self._emit("STATUS", text="Processing results...")
                 call_input = ModelCallInput(
                     input_messages=tool_outputs,
                     previous_response_id=self._response_id,
