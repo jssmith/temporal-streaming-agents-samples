@@ -160,10 +160,6 @@ async def main() -> None:
             if drain_task is not None:
                 print_status("Waiting for previous turn to finish...")
                 last_offset = await drain_task
-                await handle.signal(
-                    VoiceAnalyticsWorkflow.truncate,
-                    last_offset,
-                )
                 drain_task = None
 
             audio_b64 = base64.b64encode(audio_bytes).decode()
@@ -213,12 +209,6 @@ async def main() -> None:
                     _drain_to_turn_complete(pubsub, last_offset)
                 )
             else:
-                # Normal completion — truncate up to consumed offset.
-                await handle.signal(
-                    VoiceAnalyticsWorkflow.truncate,
-                    last_offset,
-                )
-
                 # Stop speech detection before waiting for playback to
                 # drain. The turn is complete — if the user starts
                 # speaking now, that's their next question, not an
