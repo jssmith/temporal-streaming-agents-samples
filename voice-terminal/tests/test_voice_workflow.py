@@ -622,3 +622,159 @@ class TestLargePayloads:
                 assert len(pcm) >= 50_000
 
             await handle.signal(VoiceAnalyticsWorkflow.close_session)
+
+
+class TestTruncationRace:
+    """Regression tests for truncation-related crashes."""
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_without_truncation(
+        self, client: Client, task_queue: str
+    ):
+        """Multiple turns without client-side truncation. The pub/sub log
+        grows but offsets remain valid. This is the pattern the client now
+        uses (no truncation during session, only at CAN time).
+
+        Regression: previously the client truncated after each turn, but
+        subscribe() had in-flight polls at earlier offsets. The poll would
+        arrive after truncation and crash with 'offset before base offset'.
+        """
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[VoiceAnalyticsWorkflow],
+            activities=FAKE_ACTIVITIES,
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                VoiceAnalyticsWorkflow.run,
+                VoiceWorkflowState(),
+                id=f"voice-test-notrunc-{uuid.uuid4().hex[:8]}",
+                task_queue=task_queue,
+            )
+
+            offset = 0
+            for turn in range(3):
+                await handle.signal(
+                    VoiceAnalyticsWorkflow.start_turn,
+                    StartTurnInput(audio_base64=_fake_pcm(1000)),
+                )
+                items, offset = await _collect_until_turn_complete(
+                    handle, client, offset
+                )
+                event_types = _event_types(items)
+                assert event_types[-1] == "TURN_COMPLETE", (
+                    f"Turn {turn}: last event is {event_types[-1]}"
+                )
+                # NO truncation between turns — this is the fix
+
+            await handle.signal(VoiceAnalyticsWorkflow.close_session)
+
+    @pytest.mark.xfail(
+        reason="SDK issue: poll handler raises ValueError on truncated offset, "
+        "putting the workflow task in a permanently failed state. The mixin "
+        "should return empty results instead. Client workaround: don't "
+        "truncate during the session.",
+        strict=True,
+    )
+    @pytest.mark.asyncio
+    async def test_concurrent_subscribe_and_truncate(
+        self, client: Client, task_queue: str
+    ):
+        """Start a subscription, truncate past its starting offset while
+        it's polling, and verify the workflow recovers.
+
+        Currently XFAIL: the ValueError from the stale poll puts the
+        workflow task into a permanently failed state.
+        """
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[VoiceAnalyticsWorkflow],
+            activities=FAKE_ACTIVITIES,
+            max_cached_workflows=0,
+        ):
+            handle = await client.start_workflow(
+                VoiceAnalyticsWorkflow.run,
+                VoiceWorkflowState(),
+                id=f"voice-test-race-{uuid.uuid4().hex[:8]}",
+                task_queue=task_queue,
+            )
+
+            # Turn 1
+            await handle.signal(
+                VoiceAnalyticsWorkflow.start_turn,
+                StartTurnInput(audio_base64=_fake_pcm(1000)),
+            )
+            _, offset1 = await _collect_until_turn_complete(
+                handle, client, 0
+            )
+
+            # Start a subscription from offset 0 (will be stale after truncation)
+            stale_sub = asyncio.create_task(
+                _collect_events(handle, client, 0, 1, timeout=3)
+            )
+
+            # Truncate past offset 0
+            await handle.signal(VoiceAnalyticsWorkflow.truncate, offset1)
+            await asyncio.sleep(0.5)
+
+            # The stale subscription should fail or return empty
+            try:
+                await stale_sub
+            except Exception:
+                pass
+
+            # Key assertion: workflow is still usable after the race.
+            # The workflow task may have failed from the ValueError, but
+            # Temporal retries it. Start turn 2 and verify it works.
+            await handle.signal(
+                VoiceAnalyticsWorkflow.start_turn,
+                StartTurnInput(audio_base64=_fake_pcm(1000)),
+            )
+            items2, _ = await _collect_until_turn_complete(
+                handle, client, offset1, timeout=20
+            )
+            event_types = _event_types(items2)
+            assert "TURN_COMPLETE" in event_types, (
+                "Workflow should recover after truncation race"
+            )
+
+            await handle.signal(VoiceAnalyticsWorkflow.close_session)
+
+
+class TestPartialFrameDrain:
+    """Regression test for AudioPlayer.wait_until_done with partial frames."""
+
+    @pytest.mark.asyncio
+    async def test_partial_frame_does_not_hang(self):
+        """If the playback buffer has fewer bytes than one output frame,
+        wait_until_done should still return (not hang forever).
+
+        Regression: the output callback only consumes full frames, so a
+        partial remainder stayed in the buffer forever. wait_until_done
+        checked len(buffer) == 0, which never became true.
+        """
+        from src.audio import AudioPlayer, CHANNELS, SAMPLE_WIDTH
+
+        player = AudioPlayer()
+        # Manually set internal state without starting real audio hardware.
+        player._ever_enqueued = True
+        player._interrupted = False
+        player._playing = True
+
+        # Put a partial frame in the buffer (less than 1024 * 2 = 2048 bytes)
+        partial = b"\x00" * 100
+        with player._lock:
+            player._buffer = partial
+
+        # wait_until_done should return within the timeout, not hang
+        try:
+            async with asyncio.timeout(2):
+                await player.wait_until_done()
+        except asyncio.TimeoutError:
+            pytest.fail(
+                "wait_until_done hung on partial frame "
+                f"(buffer had {len(partial)} bytes, frame is "
+                f"{1024 * CHANNELS * SAMPLE_WIDTH})"
+            )
