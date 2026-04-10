@@ -25,6 +25,7 @@ from .display import (
     print_interrupted,
     print_listening,
     print_response,
+    print_status,
     print_tool_call,
     print_transcript,
 )
@@ -73,6 +74,9 @@ async def _consume_turn(
                     data.get("arguments", {}),
                     data.get("result", {}),
                 )
+
+            elif event_type == "STATUS":
+                print_status(data.get("text", ""))
 
             elif event_type == "RESPONSE_TEXT":
                 print_response(data.get("text", ""))
@@ -143,11 +147,13 @@ async def main() -> None:
                 break
 
             if not audio_bytes:
+                logger.info("No speech detected, listening again")
                 continue
 
             # If a drain from a previous interruption is still running,
             # wait for it to finish before starting the next turn.
             if drain_task is not None:
+                print_status("Waiting for previous turn to finish...")
                 await drain_task
                 last_offset = await pubsub.get_offset()
                 await handle.signal(

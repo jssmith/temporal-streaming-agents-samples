@@ -63,6 +63,11 @@ def print_interrupted() -> None:
     sys.stdout.flush()
 
 
+def print_status(text: str) -> None:
+    print(f"  [{text}]")
+    sys.stdout.flush()
+
+
 def print_error(message: str) -> None:
     print(f"  ERROR: {message}")
     sys.stdout.flush()
