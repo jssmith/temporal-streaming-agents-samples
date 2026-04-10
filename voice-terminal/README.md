@@ -75,6 +75,8 @@ Try these to see the agent in action, building from simple to complex:
 
 In the Temporal version, each step of this conversation is visible in the
 Temporal UI as activities (transcribe, model_call, execute_sql). Audio
-chunks stream back to the client via signals as sentences complete.
+chunks and lifecycle events stream to the client via
+`temporalio.contrib.pubsub` — the activity publishes TTS audio to the
+workflow's pub/sub log, and the client subscribes for real-time playback.
 Speaking during playback sends an interrupt signal that cancels the
 current turn.
