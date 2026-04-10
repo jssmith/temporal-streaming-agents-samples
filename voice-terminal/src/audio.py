@@ -239,12 +239,16 @@ class AudioPlayer:
         while not self._ever_enqueued and not self._interrupted:
             await asyncio.sleep(0.05)
 
-        # Wait for buffer to drain
+        # Wait for buffer to drain. The output callback consumes in
+        # frame-sized chunks, so a partial frame may remain. Treat
+        # anything less than one frame (blocksize * channels * sample_width)
+        # as drained.
+        frame_bytes = 1024 * CHANNELS * SAMPLE_WIDTH
         while True:
             with self._lock:
                 if self._interrupted:
                     break
-                if len(self._buffer) == 0 and self._ever_enqueued:
+                if len(self._buffer) < frame_bytes and self._ever_enqueued:
                     break
             await asyncio.sleep(0.05)
 
