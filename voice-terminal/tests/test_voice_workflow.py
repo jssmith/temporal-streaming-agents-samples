@@ -670,13 +670,6 @@ class TestTruncationRace:
 
             await handle.signal(VoiceAnalyticsWorkflow.close_session)
 
-    @pytest.mark.xfail(
-        reason="SDK issue: poll handler raises ValueError on truncated offset, "
-        "putting the workflow task in a permanently failed state. The mixin "
-        "should return empty results instead. Client workaround: don't "
-        "truncate during the session.",
-        strict=True,
-    )
     @pytest.mark.asyncio
     async def test_concurrent_subscribe_and_truncate(
         self, client: Client, task_queue: str
@@ -684,8 +677,10 @@ class TestTruncationRace:
         """Start a subscription, truncate past its starting offset while
         it's polling, and verify the workflow recovers.
 
-        Currently XFAIL: the ValueError from the stale poll puts the
-        workflow task into a permanently failed state.
+        Previously xfail: the ValueError from the stale poll put the
+        workflow task in a permanently failed state. Fixed in the SDK:
+        poll handler now raises ApplicationError (fails the update, not
+        the workflow task) and subscribe() auto-recovers.
         """
         async with Worker(
             client,
