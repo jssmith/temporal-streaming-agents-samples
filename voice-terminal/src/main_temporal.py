@@ -10,11 +10,13 @@ Usage:
 
 import asyncio
 import base64
+import json
 import logging
 import sys
 import uuid
 
 from temporalio.client import Client
+from temporalio.contrib.pubsub import PubSubClient
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from .audio import AudioPlayer, print_audio_devices, record_until_silence
@@ -27,9 +29,8 @@ from .display import (
     print_transcript,
 )
 from .types import (
-    AckAudioInput,
-    PollAudioInput,
-    PollAudioResult,
+    AUDIO_TOPIC,
+    EVENTS_TOPIC,
     StartTurnInput,
     VoiceWorkflowState,
 )
@@ -38,6 +39,66 @@ from .workflows import VoiceAnalyticsWorkflow
 logger = logging.getLogger(__name__)
 
 TASK_QUEUE = "voice-analytics"
+
+
+async def _consume_turn(
+    pubsub: PubSubClient,
+    player: AudioPlayer,
+    from_offset: int,
+) -> None:
+    """Subscribe to pub/sub and process audio + events for one turn.
+
+    Processes items until TURN_COMPLETE or cancellation.
+    """
+    async for item in pubsub.subscribe(
+        topics=[AUDIO_TOPIC, EVENTS_TOPIC],
+        from_offset=from_offset,
+    ):
+        if item.topic == AUDIO_TOPIC:
+            payload = json.loads(item.data)
+            pcm = base64.b64decode(payload["audio_base64"])
+            player.enqueue(pcm)
+
+        elif item.topic == EVENTS_TOPIC:
+            event = json.loads(item.data)
+            event_type = event.get("type")
+            data = event.get("data", {})
+
+            if event_type == "TRANSCRIPT":
+                print_transcript(data.get("text", ""))
+
+            elif event_type == "TOOL_CALL":
+                print_tool_call(
+                    data.get("name", ""),
+                    data.get("arguments", {}),
+                    data.get("result", {}),
+                )
+
+            elif event_type == "RESPONSE_TEXT":
+                print_response(data.get("text", ""))
+
+            elif event_type == "TURN_COMPLETE":
+                return
+
+
+async def _drain_to_turn_complete(
+    pubsub: PubSubClient,
+    from_offset: int,
+) -> None:
+    """Drain pub/sub events until TURN_COMPLETE, discarding everything.
+
+    After interruption, the old turn's activity may still be publishing
+    audio chunks. We must advance past the old TURN_COMPLETE before
+    subscribing for the next turn, otherwise the stale TURN_COMPLETE
+    would cause the next subscription to exit immediately.
+    """
+    async for item in pubsub.subscribe(
+        topics=[EVENTS_TOPIC],
+        from_offset=from_offset,
+    ):
+        event = json.loads(item.data)
+        if event.get("type") == "TURN_COMPLETE":
+            return
 
 
 async def main() -> None:
@@ -67,7 +128,10 @@ async def main() -> None:
     )
     logger.info("Started workflow %s", session_id)
 
+    pubsub = PubSubClient.create(client, workflow_id=session_id)
     player = AudioPlayer()
+    last_offset = 0
+    drain_task: asyncio.Task[None] | None = None
 
     try:
         while True:
@@ -81,6 +145,17 @@ async def main() -> None:
             if not audio_bytes:
                 continue
 
+            # If a drain from a previous interruption is still running,
+            # wait for it to finish before starting the next turn.
+            if drain_task is not None:
+                await drain_task
+                last_offset = await pubsub.get_offset()
+                await handle.signal(
+                    VoiceAnalyticsWorkflow.truncate,
+                    last_offset,
+                )
+                drain_task = None
+
             audio_b64 = base64.b64encode(audio_bytes).decode()
 
             # Send audio to workflow
@@ -89,52 +164,45 @@ async def main() -> None:
                 StartTurnInput(audio_base64=audio_b64),
             )
 
-            # Poll for results
+            # Subscribe to pub/sub for this turn's audio + events
             player.start()
             player.start_speech_detection()
-            last_seen = 0
             interrupted = False
 
-            while True:
+            consume_task = asyncio.create_task(
+                _consume_turn(pubsub, player, last_offset)
+            )
+
+            # Watch for speech interruption while consuming
+            while not consume_task.done():
+                await asyncio.sleep(0.05)
                 if player.speech_detected and not interrupted:
                     interrupted = True
                     player.interrupt()
+                    consume_task.cancel()
                     await handle.signal(VoiceAnalyticsWorkflow.interrupt)
                     break
 
-                result: PollAudioResult = await handle.execute_update(
-                    VoiceAnalyticsWorkflow.poll_audio,
-                    PollAudioInput(last_seen_index=last_seen),
+            try:
+                await consume_task
+            except asyncio.CancelledError:
+                pass
+
+            if interrupted:
+                # The old turn's activity is still running. Drain past
+                # its TURN_COMPLETE in the background while the user
+                # records their next question.
+                drain_task = asyncio.create_task(
+                    _drain_to_turn_complete(pubsub, last_offset)
+                )
+            else:
+                # Normal completion — advance offset and truncate now.
+                last_offset = await pubsub.get_offset()
+                await handle.signal(
+                    VoiceAnalyticsWorkflow.truncate,
+                    last_offset,
                 )
 
-                if result.transcript and last_seen == 0:
-                    print_transcript(result.transcript)
-
-                for chunk_b64 in result.audio_chunks:
-                    pcm = base64.b64decode(chunk_b64)
-                    player.enqueue(pcm)
-
-                last_seen = result.next_index
-
-                # Ack consumed chunks so workflow can discard them
-                if result.audio_chunks:
-                    await handle.signal(
-                        VoiceAnalyticsWorkflow.ack_audio,
-                        AckAudioInput(through_index=last_seen),
-                    )
-
-                if result.turn_complete:
-                    if result.response_text:
-                        print_response(result.response_text)
-                    for tc in result.tool_calls:
-                        print_tool_call(
-                            tc.get("name", ""),
-                            tc.get("arguments", {}),
-                            tc.get("result", {}),
-                        )
-                    break
-
-            if not interrupted:
                 await player.wait_until_done()
                 if player.speech_detected:
                     print_interrupted()
@@ -142,6 +210,8 @@ async def main() -> None:
             player.stop()
 
     finally:
+        if drain_task is not None:
+            drain_task.cancel()
         await handle.signal(VoiceAnalyticsWorkflow.close_session)
         print("\nGoodbye!")
 

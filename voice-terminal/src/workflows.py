@@ -7,18 +7,15 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.contrib.pubsub import PubSubMixin
 
 with workflow.unsafe.imports_passed_through():
     from .sql_tool import TOOL_DEFINITION  # just the schema, no execution
     from .types import (
-        AckAudioInput,
-        ActivityEventsInput,
+        EVENTS_TOPIC,
         ModelCallInput,
         ModelCallResult,
-        PollAudioInput,
-        PollAudioResult,
         StartTurnInput,
-        ToolCallSummary,
         TranscribeInput,
         VoiceWorkflowState,
     )
@@ -42,27 +39,28 @@ Database schema:
 
 
 @workflow.defn
-class VoiceAnalyticsWorkflow:
+class VoiceAnalyticsWorkflow(PubSubMixin):
 
     @workflow.init
     def __init__(self, state: VoiceWorkflowState) -> None:
+        self.init_pubsub(prior_state=state.pubsub_state)
         self._messages: list[dict] = state.messages
         self._response_id: str | None = state.response_id
         self._schema: str | None = state.db_schema
         self._closed: bool = False
         self._interrupted: bool = False
-        # Turn state
         self._turn_active: bool = False
-        self._turn_complete: bool = True
         self._pending_audio: str | None = None
-        # Audio chunks + metadata for client polling.
-        # _audio_base_index tracks how many chunks have been discarded,
-        # so absolute index = _audio_base_index + position in _audio_chunks.
-        self._audio_chunks: list[str] = []
-        self._audio_base_index: int = 0
-        self._transcript: str | None = None
-        self._response_text: str | None = None
-        self._tool_calls: list[dict] = []
+
+    # -- helpers --
+
+    def _emit(self, event_type: str, **data) -> None:
+        event = {
+            "type": event_type,
+            "timestamp": workflow.now().isoformat(),
+            "data": data,
+        }
+        self.publish(EVENTS_TOPIC, json.dumps(event).encode())
 
     # -- signals --
 
@@ -79,63 +77,9 @@ class VoiceAnalyticsWorkflow:
         self._closed = True
 
     @workflow.signal
-    def receive_events(self, input: ActivityEventsInput) -> None:
-        """Receive batched events from activities (audio chunks, etc.)."""
-        for event in input.events:
-            if event.get("type") == "AUDIO_CHUNK":
-                audio_b64 = event.get("audio_base64")
-                if audio_b64:
-                    self._audio_chunks.append(audio_b64)
-
-    @workflow.signal
-    def ack_audio(self, input: AckAudioInput) -> None:
-        """Client acknowledges consumed audio chunks. Discard them to free memory."""
-        discard_count = input.through_index - self._audio_base_index
-        if discard_count > 0:
-            self._audio_chunks = self._audio_chunks[discard_count:]
-            self._audio_base_index = input.through_index
-
-    # -- update (long-poll for audio chunks) --
-
-    # Cap poll response to ~1MB of base64 audio data
-    _MAX_POLL_BYTES = 1_000_000
-
-    def _abs_len(self) -> int:
-        """Absolute index of the end of the audio chunk list."""
-        return self._audio_base_index + len(self._audio_chunks)
-
-    @workflow.update
-    async def poll_audio(self, input: PollAudioInput) -> PollAudioResult:
-        await workflow.wait_condition(
-            lambda: self._abs_len() > input.last_seen_index
-            or self._turn_complete,
-            timeout=300,
-        )
-        # Convert absolute index to position in current list
-        start_pos = max(0, input.last_seen_index - self._audio_base_index)
-
-        # Return chunks up to the size cap
-        chunks_to_return: list[str] = []
-        total_bytes = 0
-        pos = start_pos
-        while pos < len(self._audio_chunks):
-            chunk = self._audio_chunks[pos]
-            chunk_size = len(chunk)
-            if total_bytes + chunk_size > self._MAX_POLL_BYTES and chunks_to_return:
-                break  # would exceed cap, stop (but always return at least 1)
-            chunks_to_return.append(chunk)
-            total_bytes += chunk_size
-            pos += 1
-
-        next_abs_index = self._audio_base_index + pos
-        return PollAudioResult(
-            audio_chunks=chunks_to_return,
-            next_index=next_abs_index,
-            transcript=self._transcript,
-            response_text=self._response_text if self._turn_complete else None,
-            tool_calls=self._tool_calls,
-            turn_complete=self._turn_complete and pos >= len(self._audio_chunks),
-        )
+    def truncate(self, up_to_offset: int) -> None:
+        """Client signals that it has consumed events up to this offset."""
+        self.truncate_pubsub(up_to_offset)
 
     # -- query --
 
@@ -166,25 +110,21 @@ class VoiceAnalyticsWorkflow:
 
             audio_b64: str = self._pending_audio  # type: ignore[assignment]
             self._pending_audio = None
-            self._turn_complete = False
             self._turn_active = True
             self._interrupted = False
-            self._audio_chunks = []
-            self._audio_base_index = 0
-            self._transcript = None
-            self._response_text = None
-            self._tool_calls = []
 
             await self._run_turn(audio_b64)
 
-            self._turn_complete = True
             self._turn_active = False
 
             if workflow.info().is_continue_as_new_suggested():
+                self.drain_pubsub()
+                await workflow.wait_condition(workflow.all_handlers_finished)
                 workflow.continue_as_new(args=[VoiceWorkflowState(
                     messages=self._messages,
                     response_id=self._response_id,
                     db_schema=self._schema,
+                    pubsub_state=self.get_pubsub_state(),
                 )])
 
     async def _run_turn(self, audio_b64: str) -> None:
@@ -198,9 +138,10 @@ class VoiceAnalyticsWorkflow:
             retry_policy=retry_policy,
             result_type=str,
         )
-        self._transcript = transcript
+        self._emit("TRANSCRIPT", text=transcript)
 
         if self._interrupted:
+            self._emit("TURN_COMPLETE")
             return
 
         self._messages.append({"role": "user", "content": transcript})
@@ -241,14 +182,14 @@ class VoiceAnalyticsWorkflow:
             self._response_id = model_result.response_id
 
             if not model_result.tool_calls:
-                # TTS audio chunks were already signaled back by the
-                # model_call activity as sentences completed.
+                # TTS audio chunks were already published by the
+                # model_call activity via PubSubClient.
                 if model_result.final_text:
                     self._messages.append({
                         "role": "assistant",
                         "content": model_result.final_text,
                     })
-                    self._response_text = model_result.final_text
+                    self._emit("RESPONSE_TEXT", text=model_result.final_text)
                 break
 
             # Execute SQL tool calls via activity
@@ -262,14 +203,17 @@ class VoiceAnalyticsWorkflow:
                     result_type=dict,
                 )
 
-                self._tool_calls.append(ToolCallSummary(
+                self._emit(
+                    "TOOL_CALL",
                     name=tc.name,
                     arguments=tc.arguments,
                     result=result,
-                ).model_dump())
+                )
 
                 tool_outputs.append({
                     "type": "function_call_output",
                     "call_id": tc.call_id,
                     "output": json.dumps(result),
                 })
+
+        self._emit("TURN_COMPLETE")
