@@ -129,12 +129,11 @@ class AnalyticsWorkflow(PubSubMixin):
     # -- helpers --
 
     def _emit(self, event_type: str, **data) -> None:
-        event = {
+        self.publish(EVENTS_TOPIC, {
             "type": event_type,
             "timestamp": workflow.now().isoformat(),
             "data": data,
-        }
-        self.publish(EVENTS_TOPIC, json.dumps(event).encode())
+        })
 
     def _build_system_prompt(self) -> str:
         session_id = workflow.info().workflow_id

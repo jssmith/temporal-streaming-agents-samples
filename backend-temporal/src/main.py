@@ -184,9 +184,9 @@ async def run_session(session_id: str, request: RunRequest):
 
     async def event_stream():
         async for item in pubsub.subscribe(
-            topics=[EVENTS_TOPIC], from_offset=start_offset
+            topics=[EVENTS_TOPIC], from_offset=start_offset, result_type=dict
         ):
-            event = json.loads(item.data)
+            event = item.data
             yield f"data: {json.dumps(event)}\n\n"
             if event.get("type") == "AGENT_COMPLETE":
                 return
@@ -233,9 +233,9 @@ async def stream_events(session_id: str, from_index: int = 0):
 
     async def event_stream():
         async for item in pubsub.subscribe(
-            topics=[EVENTS_TOPIC], from_offset=from_index
+            topics=[EVENTS_TOPIC], from_offset=from_index, result_type=dict
         ):
-            event = json.loads(item.data)
+            event = item.data
             yield f"data: {json.dumps(event)}\n\n"
             if event.get("type") == "AGENT_COMPLETE":
                 return

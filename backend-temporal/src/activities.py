@@ -142,12 +142,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _make_event(event_type: str, **data) -> bytes:
-    return json.dumps({
+def _make_event(event_type: str, **data) -> dict:
+    """Build an event dict. The pub/sub client handles JSON serialization
+    via the data converter at flush time."""
+    return {
         "type": event_type,
         "timestamp": _now_iso(),
         "data": data,
-    }).encode()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +172,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     tool_calls, final_text).
     """
     batch_interval = float(os.environ.get("PUBSUB_BATCH_INTERVAL", "2.0"))
-    pubsub = PubSubClient.create(batch_interval=batch_interval)
+    pubsub = PubSubClient.from_activity(batch_interval=batch_interval)
     info = activity.info()
 
     async with pubsub:
@@ -181,7 +183,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                 operation_id=input.operation_id,
                 attempt=info.attempt,
                 message="Retrying model call...",
-            ), priority=True)
+            ), force_flush=True)
 
         oai_client = openai.AsyncOpenAI(max_retries=0)
 
@@ -222,7 +224,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                         if thinking_active:
                             pubsub.publish(EVENTS_TOPIC, _make_event(
                                 "THINKING_COMPLETE", content=thinking_buffer,
-                            ), priority=True)
+                            ), force_flush=True)
                             thinking_buffer = ""
                             thinking_active = False
 
@@ -340,14 +342,14 @@ async def execute_tool(input: ToolInput) -> ToolResult:
 
     # Retry detection
     if info.attempt > 1:
-        pubsub = PubSubClient.create()
+        pubsub = PubSubClient.from_activity()
         async with pubsub:
             pubsub.publish(EVENTS_TOPIC, _make_event(
                 "RETRY",
                 operation_id=input.operation_id,
                 attempt=info.attempt,
                 message=f"Retrying {input.tool_name}...",
-            ), priority=True)
+            ), force_flush=True)
 
     working_dir = Path(input.working_dir)
     result = await _run_tool(input.tool_name, input.arguments, working_dir)
