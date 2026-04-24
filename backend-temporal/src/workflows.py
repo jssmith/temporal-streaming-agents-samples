@@ -8,7 +8,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.contrib.pubsub import PubSubMixin
+from temporalio.contrib.pubsub import PubSub
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
@@ -110,11 +110,11 @@ TOOL_DEFINITIONS: list[dict] = [
 
 
 @workflow.defn
-class AnalyticsWorkflow(PubSubMixin):
+class AnalyticsWorkflow:
 
     @workflow.init
     def __init__(self, state: WorkflowState) -> None:
-        self.init_pubsub(prior_state=state.pubsub_state)
+        self.pubsub = PubSub(prior_state=state.pubsub_state)
         self._messages: list[dict] = state.messages
         self._pending_message: str | None = None
         self._turn_complete: bool = True
@@ -129,7 +129,7 @@ class AnalyticsWorkflow(PubSubMixin):
     # -- helpers --
 
     def _emit(self, event_type: str, **data) -> None:
-        self.publish(EVENTS_TOPIC, {
+        self.pubsub.publish(EVENTS_TOPIC, {
             "type": event_type,
             "timestamp": workflow.now().isoformat(),
             "data": data,
@@ -194,7 +194,7 @@ class AnalyticsWorkflow(PubSubMixin):
             self._turn_complete = True
 
             if workflow.info().is_continue_as_new_suggested():
-                self.drain_pubsub()
+                self.pubsub.drain()
                 await workflow.wait_condition(workflow.all_handlers_finished)
                 workflow.continue_as_new(args=[WorkflowState(
                     working_dir=self._working_dir,
@@ -203,7 +203,7 @@ class AnalyticsWorkflow(PubSubMixin):
                     messages=self._messages,
                     response_id=self._response_id,
                     db_schema=self._schema,
-                    pubsub_state=self.get_pubsub_state(),
+                    pubsub_state=self.pubsub.get_state(),
                 )])
 
     async def _run_turn(self, message: str) -> None:
