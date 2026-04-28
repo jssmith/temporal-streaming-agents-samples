@@ -194,16 +194,14 @@ class AnalyticsWorkflow:
             self._turn_complete = True
 
             if workflow.info().is_continue_as_new_suggested():
-                self.pubsub.drain()
-                await workflow.wait_condition(workflow.all_handlers_finished)
-                workflow.continue_as_new(args=[WorkflowState(
+                await self.pubsub.continue_as_new(lambda state: [WorkflowState(
                     working_dir=self._working_dir,
                     model=self._model,
                     reasoning_effort=self._reasoning_effort,
                     messages=self._messages,
                     response_id=self._response_id,
                     db_schema=self._schema,
-                    pubsub_state=self.pubsub.get_state(),
+                    pubsub_state=state,
                 )])
 
     async def _run_turn(self, message: str) -> None:
