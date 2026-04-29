@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.contrib.pubsub import PubSubMixin
+from temporalio.contrib.workflow_stream import WorkflowStream
 
 with workflow.unsafe.imports_passed_through():
     from .sql_tool import TOOL_DEFINITION  # just the schema, no execution
@@ -39,11 +39,11 @@ Database schema:
 
 
 @workflow.defn
-class VoiceAnalyticsWorkflow(PubSubMixin):
+class VoiceAnalyticsWorkflow:
 
     @workflow.init
     def __init__(self, state: VoiceWorkflowState) -> None:
-        self.init_pubsub(prior_state=state.pubsub_state)
+        self.stream = WorkflowStream(prior_state=state.stream_state)
         self._messages: list[dict] = state.messages
         self._response_id: str | None = state.response_id
         self._schema: str | None = state.db_schema
@@ -55,12 +55,11 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
     # -- helpers --
 
     def _emit(self, event_type: str, **data) -> None:
-        event = {
+        self.stream.publish(EVENTS_TOPIC, {
             "type": event_type,
             "timestamp": workflow.now().isoformat(),
             "data": data,
-        }
-        self.publish(EVENTS_TOPIC, json.dumps(event).encode())
+        })
 
     # -- signals --
 
@@ -79,7 +78,7 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
     @workflow.signal
     def truncate(self, up_to_offset: int) -> None:
         """Client signals that it has consumed events up to this offset."""
-        self.truncate_pubsub(up_to_offset)
+        self.stream.truncate(up_to_offset)
 
     # -- query --
 
@@ -117,11 +116,11 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
 
             self._turn_active = False
 
-            # NOTE: continue-as-new is disabled for now. The pub/sub
+            # NOTE: continue-as-new is disabled for now. The workflow stream
             # subscription has in-flight polls that race with truncation
             # during CAN, causing "offset before base offset" crashes.
             # Voice sessions are short-lived; CAN can be re-enabled once
-            # the pub/sub mixin handles truncated offsets gracefully.
+            # the streaming layer handles truncated offsets gracefully.
 
     async def _run_turn(self, audio_b64: str) -> None:
         retry_policy = RetryPolicy(maximum_attempts=3)
@@ -182,7 +181,7 @@ class VoiceAnalyticsWorkflow(PubSubMixin):
 
             if not model_result.tool_calls:
                 # TTS audio chunks were already published by the
-                # model_call activity via PubSubClient.
+                # model_call activity via WorkflowStreamClient.
                 if model_result.final_text:
                     self._messages.append({
                         "role": "assistant",

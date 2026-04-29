@@ -2,7 +2,7 @@
 
 The model_call activity streams the GPT-4.1 response, detects sentence
 boundaries, generates TTS for each sentence, and publishes audio chunks
-back to the workflow via PubSubClient.
+back to the workflow via WorkflowStreamClient.
 """
 
 import asyncio
@@ -10,10 +10,11 @@ import base64
 import json
 import logging
 import re
+from datetime import timedelta
 
 import openai
 from temporalio import activity
-from temporalio.contrib.pubsub import PubSubClient
+from temporalio.contrib.workflow_stream import WorkflowStreamClient
 from temporalio.exceptions import ApplicationError
 
 from .database import load_schema as _load_schema
@@ -68,11 +69,11 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     """Stream a model call via the OpenAI Responses API.
 
     Detects sentence boundaries in the streamed text, generates TTS for
-    each sentence, and publishes audio chunks to the workflow's pub/sub
-    log via PubSubClient. Returns structural data (response_id, tool_calls,
-    final_text).
+    each sentence, and publishes audio chunks to the workflow's stream
+    log via WorkflowStreamClient. Returns structural data (response_id,
+    tool_calls, final_text).
     """
-    pubsub = PubSubClient.create(batch_interval=0.1)
+    stream = WorkflowStreamClient.from_activity(batch_interval=timedelta(seconds=0.1))
     client = openai.AsyncOpenAI(max_retries=0)
 
     kwargs: dict = {
@@ -90,18 +91,18 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     response_id = ""
 
     async def send_sentence_audio(sentence: str) -> None:
-        """Generate TTS for a sentence and publish it to the pub/sub log."""
+        """Generate TTS for a sentence and publish it to the stream log."""
         audio_b64 = await _generate_tts(sentence)
-        pubsub.publish(
+        stream.publish(
             AUDIO_TOPIC,
-            json.dumps({"audio_base64": audio_b64}).encode(),
-            priority=True,
+            {"audio_base64": audio_b64},
+            force_flush=True,
         )
 
     try:
-        async with pubsub:
-            async with client.responses.stream(**kwargs) as stream:
-                async for event in stream:
+        async with stream:
+            async with client.responses.stream(**kwargs) as oai_stream:
+                async for event in oai_stream:
                     activity.heartbeat()
                     event_type = getattr(event, "type", None)
 
@@ -149,11 +150,11 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                     elif event_type == "response.completed":
                         response_id = event.response.id
 
-            # Flush remaining text as final sentence (after stream closes, still inside pubsub context)
+            # Flush remaining text as final sentence (after stream closes, still inside stream context)
             if text_buffer.strip():
                 await send_sentence_audio(text_buffer.strip())
 
-        # pubsub context manager flushes remaining buffer on exit
+        # stream context manager flushes remaining buffer on exit
 
     except openai.AuthenticationError as e:
         raise ApplicationError(

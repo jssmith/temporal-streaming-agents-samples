@@ -10,14 +10,13 @@ Usage:
 
 import asyncio
 import base64
-import json
 import logging
 import sys
 import uuid
 
 from temporalio.client import Client
-from temporalio.contrib.pubsub import PubSubClient
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.contrib.workflow_stream import WorkflowStreamClient
 from temporalio.service import RPCError, RPCStatusCode
 
 from .audio import AudioPlayer, print_audio_devices, record_until_silence
@@ -66,7 +65,7 @@ async def main() -> None:
     )
     logger.info("Started workflow %s", session_id)
 
-    pubsub = PubSubClient.create(client, workflow_id=session_id)
+    stream = WorkflowStreamClient.create(client, session_id)
     player = AudioPlayer()
     last_offset = 0
 
@@ -91,19 +90,20 @@ async def main() -> None:
 
             # 3. RECEIVE events + audio until TURN_COMPLETE
             player.start()
-            async for item in pubsub.subscribe(
+            async for item in stream.subscribe(
                 topics=[AUDIO_TOPIC, EVENTS_TOPIC],
                 from_offset=last_offset,
+                result_type=dict,
             ):
                 last_offset = item.offset + 1
 
                 if item.topic == AUDIO_TOPIC:
-                    payload = json.loads(item.data)
+                    payload = item.data
                     pcm = base64.b64decode(payload["audio_base64"])
                     player.enqueue(pcm)
 
                 elif item.topic == EVENTS_TOPIC:
-                    event = json.loads(item.data)
+                    event = item.data
                     event_type = event.get("type")
                     data = event.get("data", {})
 

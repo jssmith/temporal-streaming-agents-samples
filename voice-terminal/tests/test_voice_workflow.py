@@ -1,15 +1,14 @@
 """E2E tests for the voice analytics workflow with mocked activities.
 
-Tests the pub/sub integration: event delivery, truncation, offset tracking,
-and continue-as-new — all with realistic-sized audio payloads but no real
-OpenAI calls or microphone input.
+Tests the workflow stream integration: event delivery, truncation, offset
+tracking, and continue-as-new — all with realistic-sized audio payloads
+but no real OpenAI calls or microphone input.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import os
 import uuid
 from datetime import timedelta
@@ -18,8 +17,12 @@ import pytest
 
 from temporalio import activity, workflow
 from temporalio.client import Client
-from temporalio.contrib.pubsub import PubSubClient, PubSubItem, PubSubMixin
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.contrib.workflow_stream import (
+    WorkflowStream,
+    WorkflowStreamClient,
+    WorkflowStreamItem,
+)
 from temporalio.worker import Worker
 
 from src.types import (
@@ -41,12 +44,12 @@ from src.workflows import VoiceAnalyticsWorkflow
 
 
 @workflow.defn(name="VoiceWorkflowForceCAN")
-class VoiceWorkflowForceCAN(PubSubMixin):
+class VoiceWorkflowForceCAN:
     """Test workflow that continues-as-new on explicit signal."""
 
     @workflow.init
     def __init__(self, state: VoiceWorkflowState) -> None:
-        self.init_pubsub(prior_state=state.pubsub_state)
+        self.stream = WorkflowStream(prior_state=state.stream_state)
         self._messages: list[dict] = state.messages
         self._schema: str | None = state.db_schema
         self._closed = False
@@ -54,8 +57,7 @@ class VoiceWorkflowForceCAN(PubSubMixin):
         self._pending_audio: str | None = None
 
     def _emit(self, event_type: str, **data) -> None:
-        event = {"type": event_type, "data": data}
-        self.publish(EVENTS_TOPIC, json.dumps(event).encode())
+        self.stream.publish(EVENTS_TOPIC, {"type": event_type, "data": data})
 
     @workflow.signal
     def start_turn(self, input: StartTurnInput) -> None:
@@ -67,7 +69,7 @@ class VoiceWorkflowForceCAN(PubSubMixin):
 
     @workflow.signal
     def truncate(self, up_to_offset: int) -> None:
-        self.truncate_pubsub(up_to_offset)
+        self.stream.truncate(up_to_offset)
 
     @workflow.signal
     def trigger_can(self) -> None:
@@ -93,14 +95,10 @@ class VoiceWorkflowForceCAN(PubSubMixin):
 
             if self._should_can:
                 self._should_can = False
-                self.drain_pubsub()
-                await workflow.wait_condition(workflow.all_handlers_finished)
-                end_offset = self._pubsub_base_offset + len(self._pubsub_log)
-                self.truncate_pubsub(end_offset)
-                workflow.continue_as_new(args=[VoiceWorkflowState(
+                await self.stream.continue_as_new(lambda state: [VoiceWorkflowState(
                     messages=self._messages,
                     db_schema=self._schema,
-                    pubsub_state=self.get_pubsub_state(),
+                    stream_state=state,
                 )])
 
             audio_b64 = self._pending_audio
@@ -156,8 +154,8 @@ async def fake_transcribe(input: TranscribeInput) -> str:
 
 @activity.defn(name="model_call")
 async def fake_model_call(input: ModelCallInput) -> ModelCallResult:
-    """Simulate a model call that publishes TTS audio via pub/sub."""
-    pubsub = PubSubClient.create(batch_interval=0.05)
+    """Simulate a model call that publishes TTS audio via the workflow stream."""
+    stream = WorkflowStreamClient.from_activity(batch_interval=timedelta(seconds=0.05))
 
     has_tool_outputs = any(
         m.get("type") == "function_call_output" for m in input.input_messages
@@ -177,15 +175,15 @@ async def fake_model_call(input: ModelCallInput) -> ModelCallResult:
         )
 
     # Second call: generate response with TTS audio
-    async with pubsub:
+    async with stream:
         # Publish multiple audio chunks of varying sizes
         for i in range(3):
             chunk_size = 50_000 + i * 25_000  # 50KB, 75KB, 100KB
             audio_b64 = _fake_pcm(chunk_size)
-            pubsub.publish(
+            stream.publish(
                 AUDIO_TOPIC,
-                json.dumps({"audio_base64": audio_b64}).encode(),
-                priority=True,
+                {"audio_base64": audio_b64},
+                force_flush=True,
             )
             activity.heartbeat()
 
@@ -199,16 +197,16 @@ async def fake_model_call(input: ModelCallInput) -> ModelCallResult:
 @activity.defn(name="model_call_large")
 async def fake_model_call_large(input: ModelCallInput) -> ModelCallResult:
     """Model call that produces many large audio chunks (stress test)."""
-    pubsub = PubSubClient.create(batch_interval=0.05)
+    stream = WorkflowStreamClient.from_activity(batch_interval=timedelta(seconds=0.05))
 
-    async with pubsub:
+    async with stream:
         # 10 chunks of ~100KB each ≈ 1MB total
         for i in range(10):
             audio_b64 = _fake_pcm(100_000)
-            pubsub.publish(
+            stream.publish(
                 AUDIO_TOPIC,
-                json.dumps({"audio_base64": audio_b64}).encode(),
-                priority=True,
+                {"audio_base64": audio_b64},
+                force_flush=True,
             )
             activity.heartbeat()
 
@@ -243,17 +241,18 @@ async def _collect_events(
     from_offset: int,
     expected_count: int,
     timeout: float = 15.0,
-) -> tuple[list[PubSubItem], int]:
+) -> tuple[list[WorkflowStreamItem], int]:
     """Subscribe and collect expected_count items. Returns (items, last_offset)."""
-    pubsub = PubSubClient.create(client, workflow_id=handle.id)
-    items: list[PubSubItem] = []
+    stream = WorkflowStreamClient.create(client, handle.id)
+    items: list[WorkflowStreamItem] = []
     last_offset = from_offset
     try:
         async with asyncio.timeout(timeout):
-            async for item in pubsub.subscribe(
+            async for item in stream.subscribe(
                 topics=[AUDIO_TOPIC, EVENTS_TOPIC],
                 from_offset=from_offset,
-                poll_cooldown=0,
+                result_type=dict,
+                poll_cooldown=timedelta(0),
             ):
                 items.append(item)
                 last_offset = item.offset + 1
@@ -269,22 +268,23 @@ async def _collect_until_turn_complete(
     client: Client,
     from_offset: int,
     timeout: float = 15.0,
-) -> tuple[list[PubSubItem], int]:
+) -> tuple[list[WorkflowStreamItem], int]:
     """Subscribe until TURN_COMPLETE. Returns (items, offset_past_turn_complete)."""
-    pubsub = PubSubClient.create(client, workflow_id=handle.id)
-    items: list[PubSubItem] = []
+    stream = WorkflowStreamClient.create(client, handle.id)
+    items: list[WorkflowStreamItem] = []
     last_offset = from_offset
     try:
         async with asyncio.timeout(timeout):
-            async for item in pubsub.subscribe(
+            async for item in stream.subscribe(
                 topics=[AUDIO_TOPIC, EVENTS_TOPIC],
                 from_offset=from_offset,
-                poll_cooldown=0,
+                result_type=dict,
+                poll_cooldown=timedelta(0),
             ):
                 items.append(item)
                 last_offset = item.offset + 1
                 if item.topic == EVENTS_TOPIC:
-                    event = json.loads(item.data)
+                    event = item.data
                     if event.get("type") == "TURN_COMPLETE":
                         break
     except asyncio.TimeoutError:
@@ -292,13 +292,13 @@ async def _collect_until_turn_complete(
     return items, last_offset
 
 
-def _parse_event(item: PubSubItem) -> dict | None:
+def _parse_event(item: WorkflowStreamItem) -> dict | None:
     if item.topic == EVENTS_TOPIC:
-        return json.loads(item.data)
+        return item.data
     return None
 
 
-def _event_types(items: list[PubSubItem]) -> list[str]:
+def _event_types(items: list[WorkflowStreamItem]) -> list[str]:
     """Extract event types from a list of items (skipping audio)."""
     types = []
     for item in items:
@@ -511,7 +511,7 @@ class TestMultipleTurns:
 
 
 class TestContinueAsNew:
-    """Continue-as-new with pub/sub state and truncation."""
+    """Continue-as-new with stream state and truncation."""
 
     @pytest.mark.asyncio
     async def test_continue_as_new_with_truncation(
@@ -617,7 +617,7 @@ class TestLargePayloads:
 
             # Each audio chunk should decode to valid base64 PCM
             for item in audio_items:
-                payload = json.loads(item.data)
+                payload = item.data
                 pcm = base64.b64decode(payload["audio_base64"])
                 assert len(pcm) >= 50_000
 
@@ -631,9 +631,9 @@ class TestTruncationRace:
     async def test_multi_turn_without_truncation(
         self, client: Client, task_queue: str
     ):
-        """Multiple turns without client-side truncation. The pub/sub log
-        grows but offsets remain valid. This is the pattern the client now
-        uses (no truncation during session, only at CAN time).
+        """Multiple turns without client-side truncation. The workflow stream
+        log grows but offsets remain valid. This is the pattern the client
+        now uses (no truncation during session, only at CAN time).
 
         Regression: previously the client truncated after each turn, but
         subscribe() had in-flight polls at earlier offsets. The poll would
