@@ -1,7 +1,7 @@
 """Shared Pydantic models for the workflow contract."""
 
 from pydantic import BaseModel
-from temporalio.contrib.pubsub import PubSubState
+from temporalio.contrib.workflow_stream import WorkflowStreamState
 
 
 # -- Workflow input --
@@ -15,7 +15,7 @@ class WorkflowState(BaseModel):
     messages: list[dict] = []
     response_id: str | None = None
     db_schema: str | None = None
-    pubsub_state: PubSubState | None = None
+    stream_state: WorkflowStreamState | None = None
 
 
 # -- Workflow signals --

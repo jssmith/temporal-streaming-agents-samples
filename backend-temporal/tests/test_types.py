@@ -18,7 +18,7 @@ class TestWorkflowState:
         assert state.messages == []
         assert state.response_id is None
         assert state.db_schema is None
-        assert state.pubsub_state is None
+        assert state.stream_state is None
 
     def test_round_trip(self):
         state = WorkflowState(

@@ -8,7 +8,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.contrib.pubsub import PubSub
+from temporalio.contrib.workflow_stream import WorkflowStream
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
@@ -114,7 +114,7 @@ class AnalyticsWorkflow:
 
     @workflow.init
     def __init__(self, state: WorkflowState) -> None:
-        self.pubsub = PubSub(prior_state=state.pubsub_state)
+        self.stream = WorkflowStream(prior_state=state.stream_state)
         self._messages: list[dict] = state.messages
         self._pending_message: str | None = None
         self._turn_complete: bool = True
@@ -129,7 +129,7 @@ class AnalyticsWorkflow:
     # -- helpers --
 
     def _emit(self, event_type: str, **data) -> None:
-        self.pubsub.publish(EVENTS_TOPIC, {
+        self.stream.publish(EVENTS_TOPIC, {
             "type": event_type,
             "timestamp": workflow.now().isoformat(),
             "data": data,
@@ -194,14 +194,14 @@ class AnalyticsWorkflow:
             self._turn_complete = True
 
             if workflow.info().is_continue_as_new_suggested():
-                await self.pubsub.continue_as_new(lambda state: [WorkflowState(
+                await self.stream.continue_as_new(lambda state: [WorkflowState(
                     working_dir=self._working_dir,
                     model=self._model,
                     reasoning_effort=self._reasoning_effort,
                     messages=self._messages,
                     response_id=self._response_id,
                     db_schema=self._schema,
-                    pubsub_state=state,
+                    stream_state=state,
                 )])
 
     async def _run_turn(self, message: str) -> None:

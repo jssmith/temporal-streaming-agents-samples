@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowExecutionStatus
-from temporalio.contrib.pubsub import PubSubClient
+from temporalio.contrib.workflow_stream import WorkflowStreamClient
 
 from .constants import EVENTS_TOPIC
 from .types import (
@@ -172,9 +172,9 @@ async def run_session(session_id: str, request: RunRequest):
     if desc.status != WorkflowExecutionStatus.RUNNING:
         raise HTTPException(status_code=404, detail="Session not running")
 
-    # Get current pub/sub offset
-    pubsub = PubSubClient.create(client, session_id)
-    start_offset = await pubsub.get_offset()
+    # Get current stream offset
+    stream = WorkflowStreamClient.create(client, session_id)
+    start_offset = await stream.get_offset()
 
     # Fire-and-forget: enqueue the user message
     await handle.signal(
@@ -183,7 +183,7 @@ async def run_session(session_id: str, request: RunRequest):
     )
 
     async def event_stream():
-        async for item in pubsub.subscribe(
+        async for item in stream.subscribe(
             topics=[EVENTS_TOPIC], from_offset=start_offset, result_type=dict
         ):
             event = item.data
@@ -229,10 +229,10 @@ async def interrupt_session(session_id: str):
 async def stream_events(session_id: str, from_index: int = 0):
     """Resume streaming events for an in-progress turn."""
     client = await get_client()
-    pubsub = PubSubClient.create(client, session_id)
+    stream = WorkflowStreamClient.create(client, session_id)
 
     async def event_stream():
-        async for item in pubsub.subscribe(
+        async for item in stream.subscribe(
             topics=[EVENTS_TOPIC], from_offset=from_index, result_type=dict
         ):
             event = item.data
