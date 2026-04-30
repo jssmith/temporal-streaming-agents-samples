@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-04-22T05:15:25.32849Z"
+exclude-newer = "2026-04-23T01:01:23.980446Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -541,7 +541,7 @@ wheels = [
 [[package]]
 name = "temporalio"
 version = "1.26.0"
-source = { git = "https://github.com/temporalio/sdk-python.git?branch=contrib%2Fpubsub#5d72da8aa5a1fb10eae0293db051419790e675a4" }
+source = { git = "https://github.com/temporalio/sdk-python.git?branch=contrib%2Fpubsub#1b46541573964f04110f3539cf6a09b23bee5a29" }
 dependencies = [
     { name = "nexus-rpc" },
     { name = "protobuf" },
