@@ -8,7 +8,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.contrib.workflow_stream import WorkflowStream
+from temporalio.contrib.workflow_streams import WorkflowStream
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
@@ -115,6 +115,7 @@ class AnalyticsWorkflow:
     @workflow.init
     def __init__(self, state: WorkflowState) -> None:
         self.stream = WorkflowStream(prior_state=state.stream_state)
+        self.events = self.stream.topic(EVENTS_TOPIC, type=dict)
         self._messages: list[dict] = state.messages
         self._pending_message: str | None = None
         self._turn_complete: bool = True
@@ -129,7 +130,7 @@ class AnalyticsWorkflow:
     # -- helpers --
 
     def _emit(self, event_type: str, **data) -> None:
-        self.stream.publish(EVENTS_TOPIC, {
+        self.events.publish({
             "type": event_type,
             "timestamp": workflow.now().isoformat(),
             "data": data,

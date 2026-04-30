@@ -1,7 +1,7 @@
 """Pydantic models for the voice analytics workflow contract."""
 
 from pydantic import BaseModel
-from temporalio.contrib.workflow_stream import WorkflowStreamState
+from temporalio.contrib.workflow_streams import WorkflowStreamState
 
 
 # -- Topics --

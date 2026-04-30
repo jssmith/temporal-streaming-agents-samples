@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.contrib.workflow_stream import WorkflowStream
+from temporalio.contrib.workflow_streams import WorkflowStream
 
 with workflow.unsafe.imports_passed_through():
     from .sql_tool import TOOL_DEFINITION  # just the schema, no execution
@@ -44,6 +44,7 @@ class VoiceAnalyticsWorkflow:
     @workflow.init
     def __init__(self, state: VoiceWorkflowState) -> None:
         self.stream = WorkflowStream(prior_state=state.stream_state)
+        self.events = self.stream.topic(EVENTS_TOPIC, type=dict)
         self._messages: list[dict] = state.messages
         self._response_id: str | None = state.response_id
         self._schema: str | None = state.db_schema
@@ -55,7 +56,7 @@ class VoiceAnalyticsWorkflow:
     # -- helpers --
 
     def _emit(self, event_type: str, **data) -> None:
-        self.stream.publish(EVENTS_TOPIC, {
+        self.events.publish({
             "type": event_type,
             "timestamp": workflow.now().isoformat(),
             "data": data,

@@ -16,7 +16,7 @@ import uuid
 
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.contrib.workflow_stream import WorkflowStreamClient
+from temporalio.contrib.workflow_streams import WorkflowStreamClient
 from temporalio.service import RPCError, RPCStatusCode
 
 from .audio import AudioPlayer, print_audio_devices, record_until_silence

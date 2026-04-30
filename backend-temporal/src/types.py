@@ -1,7 +1,7 @@
 """Shared Pydantic models for the workflow contract."""
 
 from pydantic import BaseModel
-from temporalio.contrib.workflow_stream import WorkflowStreamState
+from temporalio.contrib.workflow_streams import WorkflowStreamState
 
 
 # -- Workflow input --

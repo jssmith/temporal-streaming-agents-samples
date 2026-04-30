@@ -10,7 +10,7 @@ from pathlib import Path
 
 import openai
 from temporalio import activity
-from temporalio.contrib.workflow_stream import WorkflowStreamClient
+from temporalio.contrib.workflow_streams import WorkflowStreamClient
 from temporalio.exceptions import ApplicationError
 
 from .database import get_connection, get_db_path, load_schema as _load_schema
@@ -174,13 +174,14 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     batch_interval = timedelta(
         seconds=float(os.environ.get("WORKFLOW_STREAM_BATCH_INTERVAL", "2.0"))
     )
-    stream = WorkflowStreamClient.from_activity(batch_interval=batch_interval)
+    stream = WorkflowStreamClient.from_within_activity(batch_interval=batch_interval)
     info = activity.info()
 
     async with stream:
+        events = stream.topic(EVENTS_TOPIC, type=dict)
         # Retry detection
         if info.attempt > 1:
-            stream.publish(EVENTS_TOPIC, _make_event(
+            events.publish(_make_event(
                 "RETRY",
                 operation_id=input.operation_id,
                 attempt=info.attempt,
@@ -218,13 +219,13 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                         delta = event.delta
                         if not thinking_active:
                             thinking_active = True
-                            stream.publish(EVENTS_TOPIC, _make_event("THINKING_START"))
+                            events.publish(_make_event("THINKING_START"))
                         thinking_buffer += delta
-                        stream.publish(EVENTS_TOPIC, _make_event("THINKING_DELTA", delta=delta))
+                        events.publish(_make_event("THINKING_DELTA", delta=delta))
 
                     elif event_type == "response.reasoning_summary_text.done":
                         if thinking_active:
-                            stream.publish(EVENTS_TOPIC, _make_event(
+                            events.publish(_make_event(
                                 "THINKING_COMPLETE", content=thinking_buffer,
                             ), force_flush=True)
                             thinking_buffer = ""
@@ -233,7 +234,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                     # Text output — stream incrementally
                     elif event_type == "response.output_text.delta":
                         text_buffer += event.delta
-                        stream.publish(EVENTS_TOPIC, _make_event("TEXT_DELTA", delta=event.delta))
+                        events.publish(_make_event("TEXT_DELTA", delta=event.delta))
 
                     # Function call argument streaming
                     elif event_type == "response.function_call_arguments.delta":
@@ -304,11 +305,11 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
 
         # Close thinking if still open
         if thinking_active:
-            stream.publish(EVENTS_TOPIC, _make_event("THINKING_COMPLETE", content=thinking_buffer))
+            events.publish(_make_event("THINKING_COMPLETE", content=thinking_buffer))
 
         # Text was streamed incrementally as TEXT_DELTA. Emit completion.
         if text_buffer:
-            stream.publish(EVENTS_TOPIC, _make_event("TEXT_COMPLETE", text=text_buffer))
+            events.publish(_make_event("TEXT_COMPLETE", text=text_buffer))
 
         # Context manager exit flushes remaining buffer
 
@@ -344,9 +345,10 @@ async def execute_tool(input: ToolInput) -> ToolResult:
 
     # Retry detection
     if info.attempt > 1:
-        stream = WorkflowStreamClient.from_activity()
+        stream = WorkflowStreamClient.from_within_activity()
         async with stream:
-            stream.publish(EVENTS_TOPIC, _make_event(
+            events = stream.topic(EVENTS_TOPIC, type=dict)
+            events.publish(_make_event(
                 "RETRY",
                 operation_id=input.operation_id,
                 attempt=info.attempt,

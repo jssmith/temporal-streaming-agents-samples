@@ -14,7 +14,7 @@ from datetime import timedelta
 
 import openai
 from temporalio import activity
-from temporalio.contrib.workflow_stream import WorkflowStreamClient
+from temporalio.contrib.workflow_streams import WorkflowStreamClient
 from temporalio.exceptions import ApplicationError
 
 from .database import load_schema as _load_schema
@@ -73,7 +73,8 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     log via WorkflowStreamClient. Returns structural data (response_id,
     tool_calls, final_text).
     """
-    stream = WorkflowStreamClient.from_activity(batch_interval=timedelta(seconds=0.1))
+    stream = WorkflowStreamClient.from_within_activity(batch_interval=timedelta(seconds=0.1))
+    audio = stream.topic(AUDIO_TOPIC, type=dict)
     client = openai.AsyncOpenAI(max_retries=0)
 
     kwargs: dict = {
@@ -93,8 +94,7 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
     async def send_sentence_audio(sentence: str) -> None:
         """Generate TTS for a sentence and publish it to the stream log."""
         audio_b64 = await _generate_tts(sentence)
-        stream.publish(
-            AUDIO_TOPIC,
+        audio.publish(
             {"audio_base64": audio_b64},
             force_flush=True,
         )

@@ -18,7 +18,7 @@ import pytest
 from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.contrib.workflow_stream import (
+from temporalio.contrib.workflow_streams import (
     WorkflowStream,
     WorkflowStreamClient,
     WorkflowStreamItem,
@@ -50,6 +50,7 @@ class VoiceWorkflowForceCAN:
     @workflow.init
     def __init__(self, state: VoiceWorkflowState) -> None:
         self.stream = WorkflowStream(prior_state=state.stream_state)
+        self.events = self.stream.topic(EVENTS_TOPIC, type=dict)
         self._messages: list[dict] = state.messages
         self._schema: str | None = state.db_schema
         self._closed = False
@@ -57,7 +58,7 @@ class VoiceWorkflowForceCAN:
         self._pending_audio: str | None = None
 
     def _emit(self, event_type: str, **data) -> None:
-        self.stream.publish(EVENTS_TOPIC, {"type": event_type, "data": data})
+        self.events.publish({"type": event_type, "data": data})
 
     @workflow.signal
     def start_turn(self, input: StartTurnInput) -> None:
@@ -155,7 +156,7 @@ async def fake_transcribe(input: TranscribeInput) -> str:
 @activity.defn(name="model_call")
 async def fake_model_call(input: ModelCallInput) -> ModelCallResult:
     """Simulate a model call that publishes TTS audio via the workflow stream."""
-    stream = WorkflowStreamClient.from_activity(batch_interval=timedelta(seconds=0.05))
+    stream = WorkflowStreamClient.from_within_activity(batch_interval=timedelta(seconds=0.05))
 
     has_tool_outputs = any(
         m.get("type") == "function_call_output" for m in input.input_messages
@@ -176,12 +177,12 @@ async def fake_model_call(input: ModelCallInput) -> ModelCallResult:
 
     # Second call: generate response with TTS audio
     async with stream:
+        audio = stream.topic(AUDIO_TOPIC, type=dict)
         # Publish multiple audio chunks of varying sizes
         for i in range(3):
             chunk_size = 50_000 + i * 25_000  # 50KB, 75KB, 100KB
             audio_b64 = _fake_pcm(chunk_size)
-            stream.publish(
-                AUDIO_TOPIC,
+            audio.publish(
                 {"audio_base64": audio_b64},
                 force_flush=True,
             )
@@ -197,14 +198,14 @@ async def fake_model_call(input: ModelCallInput) -> ModelCallResult:
 @activity.defn(name="model_call_large")
 async def fake_model_call_large(input: ModelCallInput) -> ModelCallResult:
     """Model call that produces many large audio chunks (stress test)."""
-    stream = WorkflowStreamClient.from_activity(batch_interval=timedelta(seconds=0.05))
+    stream = WorkflowStreamClient.from_within_activity(batch_interval=timedelta(seconds=0.05))
 
     async with stream:
+        audio = stream.topic(AUDIO_TOPIC, type=dict)
         # 10 chunks of ~100KB each ≈ 1MB total
         for i in range(10):
             audio_b64 = _fake_pcm(100_000)
-            stream.publish(
-                AUDIO_TOPIC,
+            audio.publish(
                 {"audio_base64": audio_b64},
                 force_flush=True,
             )
