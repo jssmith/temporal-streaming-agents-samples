@@ -242,10 +242,10 @@ async def _collect_events(
     from_offset: int,
     expected_count: int,
     timeout: float = 15.0,
-) -> tuple[list[WorkflowStreamItem], int]:
+) -> tuple[list[WorkflowStreamItem[dict]], int]:
     """Subscribe and collect expected_count items. Returns (items, last_offset)."""
     stream = WorkflowStreamClient.create(client, handle.id)
-    items: list[WorkflowStreamItem] = []
+    items: list[WorkflowStreamItem[dict]] = []
     last_offset = from_offset
     try:
         async with asyncio.timeout(timeout):
@@ -269,10 +269,10 @@ async def _collect_until_turn_complete(
     client: Client,
     from_offset: int,
     timeout: float = 15.0,
-) -> tuple[list[WorkflowStreamItem], int]:
+) -> tuple[list[WorkflowStreamItem[dict]], int]:
     """Subscribe until TURN_COMPLETE. Returns (items, offset_past_turn_complete)."""
     stream = WorkflowStreamClient.create(client, handle.id)
-    items: list[WorkflowStreamItem] = []
+    items: list[WorkflowStreamItem[dict]] = []
     last_offset = from_offset
     try:
         async with asyncio.timeout(timeout):
@@ -293,13 +293,13 @@ async def _collect_until_turn_complete(
     return items, last_offset
 
 
-def _parse_event(item: WorkflowStreamItem) -> dict | None:
+def _parse_event(item: WorkflowStreamItem[dict]) -> dict | None:
     if item.topic == EVENTS_TOPIC:
         return item.data
     return None
 
 
-def _event_types(items: list[WorkflowStreamItem]) -> list[str]:
+def _event_types(items: list[WorkflowStreamItem[dict]]) -> list[str]:
     """Extract event types from a list of items (skipping audio)."""
     types = []
     for item in items:
