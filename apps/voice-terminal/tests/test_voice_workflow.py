@@ -756,7 +756,6 @@ class TestPartialFrameDrain:
         player = AudioPlayer()
         # Manually set internal state without starting real audio hardware.
         player._ever_enqueued = True
-        player._interrupted = False
         player._playing = True
 
         # Put a partial frame in the buffer (less than 1024 * 2 = 2048 bytes)

@@ -111,10 +111,11 @@ async def record_until_silence(
 
 
 class AudioPlayer:
-    """Plays PCM audio chunks with interruption support.
+    """Plays PCM audio chunks through the default speaker.
 
-    Also monitors mic input for speech detection (barge-in).
-    Mutes the mic while audio is actively playing to avoid feedback.
+    Half-duplex: the client speaks, then the agent answers. Mid-playback
+    barge-in is intentionally not supported here — it requires a duplex
+    audio path with feedback suppression.
     """
 
     def __init__(self, sample_rate: int = OUTPUT_SAMPLE_RATE):
@@ -122,21 +123,13 @@ class AudioPlayer:
         self._buffer = b""
         self._lock = threading.Lock()
         self._playing = False
-        self._outputting = False  # True when output callback is producing audio
-        self._interrupted = False
-        self._ever_enqueued = False  # Track whether any audio was ever enqueued
+        self._ever_enqueued = False
         self._stream: sd.OutputStream | None = None
-        # Speech detection for interruption
-        self._speech_detected = False
-        self._input_stream: sd.InputStream | None = None
 
     def start(self) -> None:
         """Start the output stream."""
         self._playing = True
-        self._interrupted = False
-        self._speech_detected = False
         self._ever_enqueued = False
-        self._outputting = False
         self._buffer = b""
 
         def output_callback(outdata: np.ndarray, frames: int, time_info, status):
@@ -149,10 +142,8 @@ class AudioPlayer:
                     self._buffer = self._buffer[bytes_needed:]
                     audio_int16 = np.frombuffer(chunk, dtype=np.int16)
                     outdata[:, 0] = audio_int16.astype(np.float32) / 32767.0
-                    self._outputting = True
                 else:
                     outdata.fill(0)
-                    self._outputting = False
 
         self._stream = sd.OutputStream(
             samplerate=self._sample_rate,
@@ -163,67 +154,11 @@ class AudioPlayer:
         )
         self._stream.start()
 
-    def start_speech_detection(
-        self,
-        quiet_threshold: float = 0.06,
-        bargein_threshold: float = 0.15,
-    ) -> None:
-        """Start monitoring mic for speech (barge-in during playback).
-
-        Uses two thresholds:
-        - quiet_threshold: used when the speaker is silent (between turns
-          or during gaps). Lower because there's no competing audio.
-        - bargein_threshold: used while the speaker is actively outputting.
-          Higher to reject speaker leakage — the user's voice at the mic
-          is louder than the speaker's output picked up by the mic.
-
-        Requires ~150ms (3 frames) of sustained loud input to trigger.
-        """
-        self._speech_detected = False
-        consecutive_loud = 0
-        frames_needed = 3
-
-        def input_callback(indata: np.ndarray, frames: int, time_info, status):
-            nonlocal consecutive_loud
-            threshold = bargein_threshold if self._outputting else quiet_threshold
-            rms = np.sqrt(np.mean(indata[:, 0] ** 2))
-            if rms > threshold:
-                consecutive_loud += 1
-                if consecutive_loud >= frames_needed:
-                    self._speech_detected = True
-            else:
-                consecutive_loud = 0
-
-        self._input_stream = sd.InputStream(
-            samplerate=INPUT_SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype=np.float32,
-            blocksize=1024,
-            callback=input_callback,
-        )
-        self._input_stream.start()
-
-    def stop_speech_detection(self) -> None:
-        if self._input_stream:
-            self._input_stream.stop()
-            self._input_stream.close()
-            self._input_stream = None
-
-    @property
-    def speech_detected(self) -> bool:
-        return self._speech_detected
-
     def enqueue(self, pcm_data: bytes) -> None:
         """Add PCM audio data to the playback buffer."""
         with self._lock:
             self._buffer += pcm_data
             self._ever_enqueued = True
-
-    def interrupt(self) -> None:
-        """Immediately clear the playback buffer."""
-        with self._lock:
-            self._buffer = b""
-        self._interrupted = True
 
     @property
     def is_playing(self) -> bool:
@@ -231,35 +166,26 @@ class AudioPlayer:
             return len(self._buffer) > 0
 
     async def wait_until_done(self) -> None:
-        """Wait until the playback buffer is drained or interrupted.
-
-        Won't return prematurely if audio hasn't been enqueued yet.
-        """
-        # Wait for audio to start being enqueued
-        while not self._ever_enqueued and not self._interrupted:
+        """Wait until the playback buffer is drained."""
+        while not self._ever_enqueued:
             await asyncio.sleep(0.05)
 
-        # Wait for buffer to drain. The output callback consumes in
-        # frame-sized chunks, so a partial frame may remain. Treat
-        # anything less than one frame (blocksize * channels * sample_width)
-        # as drained.
+        # The output callback consumes in frame-sized chunks, so a partial
+        # remainder may sit in the buffer forever. Treat anything less than
+        # one frame as drained.
         frame_bytes = 1024 * CHANNELS * SAMPLE_WIDTH
         while True:
             with self._lock:
-                if self._interrupted:
-                    break
-                if len(self._buffer) < frame_bytes and self._ever_enqueued:
+                if len(self._buffer) < frame_bytes:
                     break
             await asyncio.sleep(0.05)
 
-        # Small grace period for the last audio chunk to finish playing
-        if not self._interrupted:
-            await asyncio.sleep(0.2)
+        # Small grace period for the last frame to finish playing.
+        await asyncio.sleep(0.2)
 
     def stop(self) -> None:
         """Stop the output stream."""
         self._playing = False
-        self.stop_speech_detection()
         if self._stream:
             self._stream.stop()
             self._stream.close()

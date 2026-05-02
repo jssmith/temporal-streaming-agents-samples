@@ -58,11 +58,6 @@ def print_speaking_done() -> None:
     sys.stdout.flush()
 
 
-def print_interrupted() -> None:
-    print("  [interrupted]")
-    sys.stdout.flush()
-
-
 def print_status(text: str) -> None:
     print(f"  [{text}]")
     sys.stdout.flush()

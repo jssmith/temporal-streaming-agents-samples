@@ -1,7 +1,7 @@
 """Non-Temporal voice analytics agent — simple async loop.
 
 Usage:
-    cd voice-terminal
+    cd apps/voice-terminal
     uv run python -m src.main_simple
 """
 
@@ -14,7 +14,6 @@ from .audio import AudioPlayer, print_audio_devices, record_until_silence
 from .display import (
     print_banner,
     print_error,
-    print_interrupted,
     print_listening,
     print_response,
     print_tool_call,
@@ -51,7 +50,6 @@ async def main() -> None:
         if not audio_bytes:
             continue
 
-        # Transcribe
         try:
             text = await transcribe(audio_bytes)
         except Exception as e:
@@ -64,27 +62,15 @@ async def main() -> None:
 
         print_transcript(text)
 
-        # Start playback infrastructure
         player.start()
-        player.start_speech_detection()
-        interrupted = False
 
-        # Sentence callback: stream TTS and enqueue audio
         async def on_sentence(sentence: str) -> None:
-            nonlocal interrupted
-            if interrupted:
-                return
             try:
                 async for chunk in tts_stream(sentence):
-                    if player.speech_detected:
-                        interrupted = True
-                        player.interrupt()
-                        return
                     player.enqueue(chunk)
             except Exception:
                 logger.exception("TTS failed for sentence")
 
-        # Run agent turn
         try:
             result: TurnResult = await run_turn(
                 message=text,
@@ -95,21 +81,13 @@ async def main() -> None:
             )
             response_id = result.response_id
             print_response(result.response_text)
-        except asyncio.CancelledError:
-            print_interrupted()
-            interrupted = True
         except Exception as e:
             logger.exception("Agent turn failed")
             print_error(f"Agent error: {e}")
             player.stop()
             continue
 
-        if not interrupted:
-            # Wait for playback to finish (or interruption)
-            await player.wait_until_done()
-            if player.speech_detected:
-                print_interrupted()
-
+        await player.wait_until_done()
         player.stop()
 
 

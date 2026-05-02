@@ -2,10 +2,14 @@
 
 Terminal-based voice agent that queries the Chinook music database via spoken questions.
 
+The interaction is half-duplex: speak a question, then listen for the answer.
+Mid-playback barge-in is intentionally not implemented — it requires duplex
+audio with feedback suppression, which is out of scope for this demo.
+
 ## Setup
 
 ```bash
-cd voice-terminal
+cd apps/voice-terminal
 uv sync
 ```
 
@@ -26,7 +30,7 @@ Speak your question when you see "Listening...". The agent will:
 2. Query the database if needed (GPT-4.1 + SQL)
 3. Speak the answer back (TTS)
 
-Press Ctrl+C to exit. Speak during playback to interrupt.
+Press Ctrl+C to exit.
 
 ## Run (Temporal)
 
@@ -66,18 +70,9 @@ Try these to see the agent in action, building from simple to complex:
 **Multi-step analysis**
 > "Compare sales between 2009 and 2010."
 
-**Detailed query with interruption**
-> **You:** "Tell me about the top 10 biggest spending customers. Give me a good amount of detail."
->
-> **Agent:** *(starts listing all 10 customers with cities, countries, and purchase counts...)*
->
-> **You:** *(interrupt mid-answer by speaking)* "Actually, just tell me which countries they're from."
-
 In the Temporal version, each step of this conversation is visible in the
 Temporal UI as activities (transcribe, model_call, execute_sql). Audio
 chunks and lifecycle events stream to the client via
-`temporalio.contrib.workflow_stream` — the activity publishes TTS audio
+`temporalio.contrib.workflow_streams` — the activity publishes TTS audio
 to the workflow's stream log, and the client subscribes for real-time
 playback.
-Speaking during playback sends an interrupt signal that cancels the
-current turn.

@@ -50,7 +50,6 @@ class VoiceAnalyticsWorkflow:
         self._response_id: str | None = state.response_id
         self._schema: str | None = state.db_schema
         self._closed: bool = False
-        self._interrupted: bool = False
         self._turn_active: bool = False
         self._pending_audio: str | None = None
 
@@ -68,10 +67,6 @@ class VoiceAnalyticsWorkflow:
     @workflow.signal
     def start_turn(self, input: StartTurnInput) -> None:
         self._pending_audio = input.audio_base64
-
-    @workflow.signal
-    def interrupt(self) -> None:
-        self._interrupted = True
 
     @workflow.signal
     def close_session(self) -> None:
@@ -112,7 +107,6 @@ class VoiceAnalyticsWorkflow:
             audio_b64: str = self._pending_audio  # type: ignore[assignment]
             self._pending_audio = None
             self._turn_active = True
-            self._interrupted = False
 
             await self._run_turn(audio_b64)
 
@@ -138,10 +132,6 @@ class VoiceAnalyticsWorkflow:
         )
         self._emit("TRANSCRIPT", text=transcript)
 
-        if self._interrupted:
-            self._emit("TURN_COMPLETE")
-            return
-
         self._messages.append({"role": "user", "content": transcript})
 
         # 2. Agent loop (model call + tool execution)
@@ -153,7 +143,7 @@ class VoiceAnalyticsWorkflow:
 
         tool_outputs: list[dict] | None = None
 
-        while not self._interrupted:
+        while True:
             if tool_outputs is not None:
                 self._emit("STATUS", text="Processing results...")
                 call_input = ModelCallInput(
