@@ -65,6 +65,7 @@ async def main() -> None:
     stream = WorkflowStreamClient.create(client, session_id)
     player = AudioPlayer()
     last_offset = 0
+    session_ended_by_agent = False
 
     try:
         while True:
@@ -116,6 +117,10 @@ async def main() -> None:
                         )
                     elif event_type == "RESPONSE_TEXT":
                         print_response(data.get("text", ""))
+                    elif event_type == "SESSION_CLOSED":
+                        # Don't break here — wait for TURN_COMPLETE so any
+                        # trailing audio is enqueued for playback first.
+                        session_ended_by_agent = True
                     elif event_type == "TURN_COMPLETE":
                         break
 
@@ -126,16 +131,25 @@ async def main() -> None:
             await player.wait_until_done()
             player.stop()
             if last_offset > 0:
-                await handle.signal(VoiceAnalyticsWorkflow.truncate, last_offset)
+                try:
+                    await handle.signal(
+                        VoiceAnalyticsWorkflow.truncate, last_offset
+                    )
+                except RPCError as e:
+                    if e.status != RPCStatusCode.NOT_FOUND:
+                        raise
+
+            if session_ended_by_agent:
+                print("\n[Session ended by agent.]")
+                break
 
     finally:
-        try:
-            await handle.signal(VoiceAnalyticsWorkflow.close_session)
-        except RPCError as e:
-            if e.status == RPCStatusCode.NOT_FOUND:
-                logger.info("Workflow already completed")
-            else:
-                raise
+        if not session_ended_by_agent:
+            try:
+                await handle.signal(VoiceAnalyticsWorkflow.close_session)
+            except RPCError as e:
+                if e.status != RPCStatusCode.NOT_FOUND:
+                    raise
         print("\nGoodbye!")
 
 

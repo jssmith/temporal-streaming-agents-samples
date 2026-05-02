@@ -25,10 +25,22 @@ logger = workflow.logger
 
 MODEL = "gpt-4.1"
 
+END_SESSION_TOOL = {
+    "type": "function",
+    "name": "end_session",
+    "description": (
+        "End the conversation and shut down the workflow. Call this only when "
+        "the user clearly indicates they are done — saying goodbye, 'we're done', "
+        "'that's all', etc. Speak a brief farewell to the user before calling it."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
 SYSTEM_PROMPT_TEMPLATE = """You are a voice analytics assistant with access to a Chinook music store database (SQLite).
 
-You have one tool:
-- execute_sql: Run read-only SQL queries against the database
+You have two tools:
+- execute_sql: Run read-only SQL queries against the database.
+- end_session: End the conversation. Call this when the user says goodbye or otherwise indicates they're done. Speak a brief farewell first.
 
 Keep your spoken responses concise and conversational. When presenting data, summarize the key
 findings rather than reading out entire tables.
@@ -161,21 +173,22 @@ class VoiceAnalyticsWorkflow:
             input_messages.append({"role": msg["role"], "content": msg["content"]})
 
         tool_outputs: list[dict] | None = None
+        end_session_called = False
 
-        while True:
+        while not end_session_called:
             if tool_outputs is not None:
                 self._emit("STATUS", text="Processing results...")
                 call_input = ModelCallInput(
                     input_messages=tool_outputs,
                     previous_response_id=self._response_id,
-                    tools=[TOOL_DEFINITION],
+                    tools=[TOOL_DEFINITION, END_SESSION_TOOL],
                     model=MODEL,
                 )
             else:
                 call_input = ModelCallInput(
                     input_messages=input_messages,
                     previous_response_id=self._response_id,
-                    tools=[TOOL_DEFINITION],
+                    tools=[TOOL_DEFINITION, END_SESSION_TOOL],
                     model=MODEL,
                 )
 
@@ -201,9 +214,15 @@ class VoiceAnalyticsWorkflow:
                     self._emit("RESPONSE_TEXT", text=model_result.final_text)
                 break
 
-            # Execute SQL tool calls via activity
+            # Dispatch each tool call. end_session is handled in-workflow
+            # (no activity); other tools route to execute_sql.
             tool_outputs = []
             for tc in model_result.tool_calls:
+                if tc.name == "end_session":
+                    self._emit("TOOL_CALL", name=tc.name, arguments=tc.arguments, result={})
+                    end_session_called = True
+                    continue
+
                 result: dict = await workflow.execute_activity(
                     "execute_sql",
                     tc.arguments.get("query", ""),
@@ -225,4 +244,13 @@ class VoiceAnalyticsWorkflow:
                     "output": json.dumps(result),
                 })
 
+            # If every tool in this batch was end_session, there's nothing
+            # to feed back to the model — break out of the agent loop.
+            if not tool_outputs:
+                break
+
+        if end_session_called:
+            self._emit("SESSION_CLOSED")
         self._emit("TURN_COMPLETE")
+        if end_session_called:
+            self._closed = True

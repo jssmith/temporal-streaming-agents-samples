@@ -70,6 +70,14 @@ Try these to see the agent in action, building from simple to complex:
 **Multi-step analysis**
 > "Compare sales between 2009 and 2010."
 
+**End the session**
+> "Thanks, that's all. Goodbye."
+
+The agent has an `end_session` tool. When it hears a clear goodbye it
+speaks a short farewell and calls the tool, which sets the workflow's
+closed flag and returns from `run()` cleanly. The client sees the
+`SESSION_CLOSED` event, finishes playing the farewell, and exits.
+
 In the Temporal version, each step of this conversation is visible in the
 Temporal UI as activities (transcribe, model_call, execute_sql). Audio
 chunks and lifecycle events stream to the client via
