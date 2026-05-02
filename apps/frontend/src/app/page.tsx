@@ -258,6 +258,12 @@ export default function Home() {
   }
 
   const isEmptyChat = chatState.messages.length === 0 && chatState.currentTurn.steps.length === 0;
+  // Only show the suggested-prompts picker for a brand-new chat (no session
+  // selected yet). When switching between existing sessions there's a brief
+  // window where messages are cleared but the next session's history hasn't
+  // streamed in; rendering the picker there flashed the menu before the
+  // conversation painted. For that window we want a blank canvas instead.
+  const showSuggestedPrompts = isEmptyChat && activeSessionId === null;
 
   return (
     <div className="flex h-screen">
@@ -279,7 +285,7 @@ export default function Home() {
         {/* Messages */}
         <main className="flex-1 overflow-y-auto px-6 pb-4">
           <div className="max-w-[800px] mx-auto">
-            {isEmptyChat && (
+            {showSuggestedPrompts && (
               <div className="flex flex-col items-center justify-center h-[calc(100vh-140px)] gap-6">
                 <p className="text-gray-500 text-sm">Ask anything about the Chinook music store database</p>
                 <div className="flex flex-wrap justify-center gap-2">
