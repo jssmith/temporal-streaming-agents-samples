@@ -64,6 +64,12 @@ class VoiceAnalyticsWorkflow:
         self._closed: bool = state.closed
         self._turn_active: bool = False
         self._pending_audio: str | None = state.pending_audio
+        # When the agent itself ends the session via the end_session tool,
+        # we hold the workflow open until the client has drained the final
+        # SESSION_CLOSED / TURN_COMPLETE events via truncate. Without this,
+        # the workflow completes before subscribe can deliver them and the
+        # client tries to start another turn against a closed workflow.
+        self._end_session_requested: bool = False
 
     # -- helpers --
 
@@ -114,6 +120,19 @@ class VoiceAnalyticsWorkflow:
                 lambda: self._pending_audio is not None or self._closed
             )
             if self._closed:
+                # If the agent itself ended the session, give the client a
+                # chance to consume the final events before we exit.
+                # Truncation by the client clears _log; once it's empty the
+                # subscriber has acknowledged everything we published.
+                if self._end_session_requested:
+                    try:
+                        await workflow.wait_condition(
+                            lambda: len(self.stream._log) == 0,
+                            timeout=timedelta(seconds=10),
+                        )
+                    except TimeoutError:
+                        # Best-effort drain; client may have died.
+                        pass
                 return
 
             audio_b64: str = self._pending_audio  # type: ignore[assignment]
@@ -253,4 +272,5 @@ class VoiceAnalyticsWorkflow:
             self._emit("SESSION_CLOSED")
         self._emit("TURN_COMPLETE")
         if end_session_called:
+            self._end_session_requested = True
             self._closed = True

@@ -81,10 +81,16 @@ async def main() -> None:
 
             # 2. SEND to workflow
             audio_b64 = base64.b64encode(audio_bytes).decode()
-            await handle.signal(
-                VoiceAnalyticsWorkflow.start_turn,
-                StartTurnInput(audio_base64=audio_b64),
-            )
+            try:
+                await handle.signal(
+                    VoiceAnalyticsWorkflow.start_turn,
+                    StartTurnInput(audio_base64=audio_b64),
+                )
+            except RPCError as e:
+                if e.status == RPCStatusCode.NOT_FOUND:
+                    print("\n[Workflow already ended.]")
+                    break
+                raise
 
             # 3. RECEIVE events + audio until TURN_COMPLETE
             player.start()
