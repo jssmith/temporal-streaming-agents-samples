@@ -24,13 +24,27 @@ esac
 
 PIDS=()
 CLEANED=0
+# Recursively kill a process and all its descendants. The PIDs we track are
+# wrapper subshells (because start_bg pipes through sed); SIGTERM on the
+# subshell alone leaves uv/python/uvicorn/next-dev orphaned and bound to
+# their ports.
+kill_tree() {
+  local pid="$1"
+  local sig="${2:-TERM}"
+  local children
+  children=$(pgrep -P "$pid" 2>/dev/null || true)
+  for c in $children; do
+    kill_tree "$c" "$sig"
+  done
+  kill -"$sig" "$pid" 2>/dev/null || true
+}
 cleanup() {
   [ "$CLEANED" = 1 ] && return
   CLEANED=1
   echo
   echo "[run-demo] shutting down..."
   for pid in "${PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+    kill_tree "$pid" TERM
   done
   for pid in "${PIDS[@]:-}"; do
     wait "$pid" 2>/dev/null || true
@@ -41,6 +55,8 @@ trap cleanup EXIT INT TERM
 start_bg() {
   # Run a backgrounded process; tag stdout/stderr with a prefix so
   # multiple processes' output is distinguishable in one terminal.
+  # We track the wrapper subshell PID and reach the real children via
+  # kill_tree at cleanup time.
   local label="$1"; shift
   ( "$@" 2>&1 | sed -u "s/^/[$label] /" ) &
   PIDS+=("$!")
@@ -60,20 +76,33 @@ command -v temporal >/dev/null || {
 TARGET_ADDR=""
 TARGET_NS=""
 if [ "$mode" = "analytics" ] && [ -f apps/backend-temporal/.env ]; then
+  # Normalize first so `export FOO=bar`, ` FOO = bar `, and CRLF all parse
+  # the same way python-dotenv does. Then read key=value with the rest
+  # treated as a single value (handles `=` characters in values).
   while IFS='=' read -r key value; do
+    [ -z "$key" ] && continue
+    # strip surrounding quotes
     value="${value%\"}"; value="${value#\"}"
     value="${value%\'}"; value="${value#\'}"
     case "$key" in
       TEMPORAL_ADDRESS) TARGET_ADDR="$value" ;;
       TEMPORAL_NAMESPACE) TARGET_NS="$value" ;;
     esac
-  done < <(grep -v "^[[:space:]]*#" apps/backend-temporal/.env | grep "=")
+  done < <(
+    sed -E \
+      -e 's/\r$//' \
+      -e 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+      -e 's/^export[[:space:]]+//' \
+      -e 's/^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*/\1=/' \
+      apps/backend-temporal/.env \
+      | grep -v "^#" | grep "="
+  )
 fi
 # voice-terminal hardcodes localhost:7233 in worker.py / main_temporal.py.
 [ "$mode" = "voice" ] && TARGET_ADDR="localhost:7233"
 TARGET_ADDR="${TARGET_ADDR:-localhost:7233}"
 case "$TARGET_ADDR" in
-  localhost:*|127.0.0.1:*) USE_LOCAL_TEMPORAL=true ;;
+  localhost:*|127.0.0.1:*|"[::1]:"*|"[::1]") USE_LOCAL_TEMPORAL=true ;;
   *) USE_LOCAL_TEMPORAL=false ;;
 esac
 command -v uv >/dev/null || {
@@ -92,20 +121,20 @@ fi
 # ---- Temporal dev server --------------------------------------------------
 
 if [ "$USE_LOCAL_TEMPORAL" = true ]; then
-  if temporal operator namespace list >/dev/null 2>&1; then
+  if temporal operator namespace list --address "$TARGET_ADDR" >/dev/null 2>&1; then
     echo "[temporal] already reachable on $TARGET_ADDR (using existing server)"
   else
     echo "[temporal] starting dev server (log: $LOG_DIR/temporal.log)..."
     ( temporal server start-dev > "$LOG_DIR/temporal.log" 2>&1 ) &
     PIDS+=("$!")
     for _ in $(seq 1 60); do
-      if temporal operator namespace list >/dev/null 2>&1; then
+      if temporal operator namespace list --address "$TARGET_ADDR" >/dev/null 2>&1; then
         echo "[temporal] ready (UI: http://localhost:8233)"
         break
       fi
       sleep 0.5
     done
-    if ! temporal operator namespace list >/dev/null 2>&1; then
+    if ! temporal operator namespace list --address "$TARGET_ADDR" >/dev/null 2>&1; then
       echo "[temporal] failed to start; tail of $LOG_DIR/temporal.log:" >&2
       tail -n 20 "$LOG_DIR/temporal.log" >&2 || true
       exit 1
