@@ -13,13 +13,13 @@ export default defineConfig({
   retries: 1,
   webServer: [
     {
-      command: "cd backend-ephemeral && uv run uvicorn src.main:app --port 8000",
+      command: "cd apps/backend-ephemeral && uv run uvicorn src.main:app --port 8000",
       port: 8000,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: "cd frontend && BACKEND_URL=http://localhost:8000 npm run dev",
+      command: "cd apps/frontend && BACKEND_URL=http://localhost:8000 npm run dev",
       port: 3001,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,

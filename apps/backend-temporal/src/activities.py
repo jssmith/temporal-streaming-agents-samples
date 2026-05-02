@@ -1,0 +1,331 @@
+"""Temporal activities for the analytics agent."""
+
+import asyncio
+import json
+import logging
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import openai
+from temporalio import activity
+from temporalio.contrib.workflow_streams import WorkflowStreamClient
+from temporalio.exceptions import ApplicationError
+
+from analytics_shared.constants import EVENTS_TOPIC
+from analytics_shared.database import get_db_path, load_schema as _load_schema
+from analytics_shared.sql_tool import execute_sql as _execute_sql
+from analytics_shared.types import ToolCallInfo
+
+from .types import (
+    ModelCallInput,
+    ModelCallResult,
+    TokenUsage,
+    ToolInput,
+    ToolResult,
+)
+
+logger = logging.getLogger(__name__)
+
+TIMEOUT_SECONDS = 30
+
+
+async def _execute_python(code: str, working_dir: Path) -> dict:
+    """Execute Python code in a subprocess."""
+    db_path = str(get_db_path().resolve())
+    env = {**os.environ, "DB_PATH": db_path}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code,
+            cwd=str(working_dir),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=TIMEOUT_SECONDS
+        )
+
+        result: dict = {}
+        if stdout:
+            result["output"] = stdout.decode()
+        if stderr:
+            result["error"] = stderr.decode()
+        if not stdout and not stderr:
+            result["output"] = "(no output)"
+        return result
+
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {"error": f"Execution timed out after {TIMEOUT_SECONDS}s"}
+
+
+async def _execute_bash(command: str, working_dir: Path) -> dict:
+    """Execute a shell command in a subprocess."""
+    db_path = str(get_db_path().resolve())
+    env = {**os.environ, "DB_PATH": db_path}
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(working_dir),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=TIMEOUT_SECONDS
+        )
+
+        output = (stdout.decode() if stdout else "") + (stderr.decode() if stderr else "")
+        return {"output": output, "exit_code": proc.returncode}
+
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {"error": f"Execution timed out after {TIMEOUT_SECONDS}s"}
+
+
+async def _run_tool(tool_name: str, arguments: dict, working_dir: Path) -> dict:
+    """Dispatch a tool call to the appropriate implementation."""
+    if tool_name == "execute_sql":
+        return await _execute_sql(arguments["query"])
+    elif tool_name == "execute_python":
+        return await _execute_python(arguments["code"], working_dir)
+    elif tool_name == "bash":
+        return await _execute_bash(arguments["command"], working_dir)
+    else:
+        return {"error": f"Unknown tool: {tool_name}"}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _make_event(event_type: str, **data) -> dict:
+    """Build an event dict. The pub/sub client handles JSON serialization
+    via the data converter at flush time."""
+    return {
+        "type": event_type,
+        "timestamp": _now_iso(),
+        "data": data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Activities
+# ---------------------------------------------------------------------------
+
+
+@activity.defn
+async def load_schema() -> str:
+    """Load the database schema. Runs as an activity to keep I/O out of workflows."""
+    return await asyncio.to_thread(_load_schema)
+
+
+@activity.defn
+async def model_call(input: ModelCallInput) -> ModelCallResult:
+    """Stream a model call via the OpenAI Responses API.
+
+    Publishes streaming events (THINKING_DELTA, TEXT_DELTA, etc.) to the
+    workflow via WorkflowStreamClient. Returns structural data
+    (response_id, tool_calls, final_text).
+    """
+    batch_interval = timedelta(
+        seconds=float(os.environ.get("WORKFLOW_STREAM_BATCH_INTERVAL", "2.0"))
+    )
+    stream = WorkflowStreamClient.from_within_activity(batch_interval=batch_interval)
+    info = activity.info()
+
+    async with stream:
+        events = stream.topic(EVENTS_TOPIC, type=dict)
+        # Retry detection
+        if info.attempt > 1:
+            events.publish(_make_event(
+                "RETRY",
+                operation_id=input.operation_id,
+                attempt=info.attempt,
+                message="Retrying model call...",
+            ), force_flush=True)
+
+        oai_client = openai.AsyncOpenAI(max_retries=0)
+
+        kwargs: dict = {
+            "model": input.model,
+            "tools": input.tools,
+            "input": input.input_messages,
+            "store": True,
+        }
+        if input.reasoning_effort:
+            kwargs["reasoning"] = {"effort": input.reasoning_effort}
+        if input.previous_response_id:
+            kwargs["previous_response_id"] = input.previous_response_id
+
+        tool_calls: dict[str, dict] = {}
+        text_buffer = ""
+        thinking_buffer = ""
+        thinking_active = False
+        response_id = ""
+        token_usage: TokenUsage | None = None
+
+        try:
+            async with oai_client.responses.stream(**kwargs) as oai_stream:
+                async for event in oai_stream:
+                    activity.heartbeat()
+                    event_type = getattr(event, "type", None)
+
+                    # Thinking/reasoning events
+                    if event_type == "response.reasoning_summary_text.delta":
+                        delta = event.delta
+                        if not thinking_active:
+                            thinking_active = True
+                            events.publish(_make_event("THINKING_START"))
+                        thinking_buffer += delta
+                        events.publish(_make_event("THINKING_DELTA", delta=delta))
+
+                    elif event_type == "response.reasoning_summary_text.done":
+                        if thinking_active:
+                            events.publish(_make_event(
+                                "THINKING_COMPLETE", content=thinking_buffer,
+                            ), force_flush=True)
+                            thinking_buffer = ""
+                            thinking_active = False
+
+                    # Text output — stream incrementally
+                    elif event_type == "response.output_text.delta":
+                        text_buffer += event.delta
+                        events.publish(_make_event("TEXT_DELTA", delta=event.delta))
+
+                    # Function call argument streaming
+                    elif event_type == "response.function_call_arguments.delta":
+                        item_id = event.item_id
+                        if item_id not in tool_calls:
+                            tool_calls[item_id] = {"name": None, "arguments_str": ""}
+                        tool_calls[item_id]["arguments_str"] += event.delta
+
+                    elif event_type == "response.function_call_arguments.done":
+                        item_id = event.item_id
+                        if item_id in tool_calls:
+                            tool_calls[item_id]["arguments_str"] = event.arguments
+
+                    # Output item added — captures function name and call_id
+                    elif event_type == "response.output_item.added":
+                        item = event.item
+                        if getattr(item, "type", None) == "function_call":
+                            item_id = getattr(item, "id", None)
+                            call_id = getattr(item, "call_id", None)
+                            name = item.name
+                            if item_id:
+                                tool_calls[item_id] = {
+                                    "name": name,
+                                    "call_id": call_id,
+                                    "arguments_str": tool_calls.get(item_id, {}).get("arguments_str", ""),
+                                }
+
+                    # Response completed — capture response_id
+                    elif event_type == "response.completed":
+                        response = event.response
+                        response_id = response.id
+                        if response.usage:
+                            u = response.usage
+                            token_usage = TokenUsage(
+                                input_tokens=u.input_tokens,
+                                output_tokens=u.output_tokens,
+                                reasoning_tokens=getattr(u.output_tokens_details, "reasoning_tokens", 0) or 0,
+                                cached_tokens=getattr(u.input_tokens_details, "cached_tokens", 0) or 0,
+                            )
+
+        except openai.AuthenticationError as e:
+            raise ApplicationError(
+                f"Invalid API key: {e}",
+                type="AuthenticationError",
+                non_retryable=True,
+            ) from e
+        except openai.RateLimitError as e:
+            raise ApplicationError(
+                f"Rate limited: {e}",
+                type="RateLimitError",
+            ) from e
+        except openai.APIStatusError as e:
+            if e.status_code >= 500:
+                raise ApplicationError(
+                    f"OpenAI server error ({e.status_code}): {e}",
+                    type="ServerError",
+                ) from e
+            raise ApplicationError(
+                f"OpenAI client error ({e.status_code}): {e}",
+                type="ClientError",
+                non_retryable=True,
+            ) from e
+        except openai.APIConnectionError as e:
+            raise ApplicationError(
+                f"Connection error: {e}",
+                type="ConnectionError",
+            ) from e
+
+        # Close thinking if still open
+        if thinking_active:
+            events.publish(_make_event("THINKING_COMPLETE", content=thinking_buffer))
+
+        # Text was streamed incrementally as TEXT_DELTA. Emit completion.
+        if text_buffer:
+            events.publish(_make_event("TEXT_COMPLETE", text=text_buffer))
+
+        # Context manager exit flushes remaining buffer
+
+    # Build tool call info
+    parsed_tool_calls = []
+    for item_id, tc in tool_calls.items():
+        try:
+            arguments = json.loads(tc["arguments_str"])
+        except json.JSONDecodeError:
+            arguments = {}
+        parsed_tool_calls.append(ToolCallInfo(
+            item_id=item_id,
+            call_id=tc.get("call_id", item_id),
+            name=tc["name"],
+            arguments=arguments,
+        ))
+
+    return ModelCallResult(
+        response_id=response_id,
+        tool_calls=parsed_tool_calls,
+        final_text=text_buffer if not tool_calls else None,
+        usage=token_usage,
+    )
+
+
+@activity.defn
+async def execute_tool(input: ToolInput) -> ToolResult:
+    """Execute a tool and return its result.
+
+    For retry scenarios, publishes a RETRY event before re-executing.
+    """
+    info = activity.info()
+
+    # Retry detection
+    if info.attempt > 1:
+        stream = WorkflowStreamClient.from_within_activity()
+        async with stream:
+            events = stream.topic(EVENTS_TOPIC, type=dict)
+            events.publish(_make_event(
+                "RETRY",
+                operation_id=input.operation_id,
+                attempt=info.attempt,
+                message=f"Retrying {input.tool_name}...",
+            ), force_flush=True)
+
+    working_dir = Path(input.working_dir)
+    result = await _run_tool(input.tool_name, input.arguments, working_dir)
+
+    return ToolResult(
+        call_id=input.call_id,
+        tool_name=input.tool_name,
+        result=result,
+    )

@@ -6,10 +6,16 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-cd backend-temporal
+cd apps/backend-temporal
 
 uv run python -m src.worker &
 WORKER_PID=$!
-trap 'kill "$WORKER_PID" 2>/dev/null || true' EXIT INT TERM
 
-exec uv run uvicorn src.main:app --port 8001
+# `exec` would replace this shell with uvicorn and skip the EXIT trap, leaving
+# the worker orphaned. Stay as the parent and forward TERM/INT to both.
+trap 'kill "$WORKER_PID" "$BFF_PID" 2>/dev/null || true; wait "$WORKER_PID" 2>/dev/null || true; wait "$BFF_PID" 2>/dev/null || true' EXIT INT TERM
+
+uv run uvicorn src.main:app --port 8001 &
+BFF_PID=$!
+
+wait "$BFF_PID"

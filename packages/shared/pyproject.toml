@@ -1,0 +1,15 @@
+[project]
+name = "analytics-shared"
+version = "0.1.0"
+description = "Shared library for the streaming-agents sample apps (Chinook DB access, SQL tool, common types)."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/analytics_shared"]

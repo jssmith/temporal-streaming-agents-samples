@@ -1,0 +1,12 @@
+[tool.uv]
+# Supply-chain cooldown: ignore packages published after this timestamp.
+# Pinned (rather than relative) because temporalio 1.27.0 shipped 2026-04-30.
+exclude-newer = "2026-05-01T00:00:00Z"
+
+[tool.uv.workspace]
+members = [
+    "apps/voice-terminal",
+    "apps/backend-temporal",
+    "apps/backend-ephemeral",
+    "packages/shared",
+]
