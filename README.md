@@ -249,6 +249,22 @@ uv sync  # workspace at the repo root installs all apps + packages/shared
 
 ### Running
 
+The fastest path is `scripts/run-demo.sh`, which boots everything and
+attaches to an already-running Temporal dev server if one is up:
+
+```bash
+export OPENAI_API_KEY=sk-...
+scripts/run-demo.sh analytics    # backend-temporal worker + BFF + frontend
+# or
+scripts/run-demo.sh voice        # voice-terminal worker; client runs in another terminal
+```
+
+For the analytics demo, browse to <http://localhost:3001>. For the voice
+demo, the script starts the worker and prints the client command to run
+in a second terminal.
+
+If you'd rather run the components by hand:
+
 ```bash
 # Terminal 1: Temporal dev server
 temporal server start-dev
