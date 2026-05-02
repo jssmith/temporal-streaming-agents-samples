@@ -117,14 +117,17 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                         text_buffer += event.delta
                         full_text += event.delta
 
-                        # Check for sentence boundary to fire TTS
-                        if len(text_buffer) >= MIN_FLUSH_LEN:
+                        # Loop over sentence boundaries so a delta containing
+                        # several complete sentences flushes them all instead
+                        # of waiting for the next delta.
+                        while len(text_buffer) >= MIN_FLUSH_LEN:
                             match = SENTENCE_END.search(text_buffer)
-                            if match:
-                                sentence = text_buffer[:match.end()].strip()
-                                text_buffer = text_buffer[match.end():]
-                                if sentence:
-                                    await send_sentence_audio(sentence)
+                            if not match:
+                                break
+                            sentence = text_buffer[: match.end()].strip()
+                            text_buffer = text_buffer[match.end():]
+                            if sentence:
+                                await send_sentence_audio(sentence)
 
                     # Function call argument streaming
                     elif event_type == "response.function_call_arguments.delta":
