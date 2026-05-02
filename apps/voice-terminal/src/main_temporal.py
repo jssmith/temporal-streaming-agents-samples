@@ -119,9 +119,14 @@ async def main() -> None:
                     elif event_type == "TURN_COMPLETE":
                         break
 
-            # 4. WAIT for playback to finish
+            # 4. WAIT for playback to finish, then ack the consumed range so
+            #    the workflow can drop the audio bytes from its live stream.
+            #    Per-turn truncation: bounded by max_output_tokens at the
+            #    activity, so at most ~10 MB of un-acked audio at any time.
             await player.wait_until_done()
             player.stop()
+            if last_offset > 0:
+                await handle.signal(VoiceAnalyticsWorkflow.truncate, last_offset)
 
     finally:
         try:

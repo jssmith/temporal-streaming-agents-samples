@@ -112,11 +112,13 @@ class VoiceAnalyticsWorkflow:
 
             self._turn_active = False
 
-            # NOTE: continue-as-new is disabled for now. The workflow stream
-            # subscription has in-flight polls that race with truncation
-            # during CAN, causing "offset before base offset" crashes.
-            # Voice sessions are short-lived; CAN can be re-enabled once
-            # the streaming layer handles truncated offsets gracefully.
+            if workflow.info().is_continue_as_new_suggested():
+                await self.stream.continue_as_new(lambda state: [VoiceWorkflowState(
+                    messages=self._messages,
+                    response_id=self._response_id,
+                    db_schema=self._schema,
+                    stream_state=state,
+                )])
 
     async def _run_turn(self, audio_b64: str) -> None:
         retry_policy = RetryPolicy(maximum_attempts=3)
