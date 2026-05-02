@@ -53,13 +53,29 @@ command -v temporal >/dev/null || {
   exit 1
 }
 
-# Pin every spawned process to the local dev server, even if a per-app
-# .env points at Temporal Cloud. python-dotenv's load_dotenv(override=False)
-# (the default) won't overwrite these, so workers + BFF use local Temporal.
-# Bypass the script if you want to demo against Cloud.
-export TEMPORAL_ADDRESS="localhost:7233"
-export TEMPORAL_NAMESPACE="default"
-export TEMPORAL_API_KEY=""
+# Decide which Temporal cluster the spawned processes will use, so we
+# can (a) only boot a local dev server when actually needed, and
+# (b) print where they connected to up front. Honors per-app .env via
+# the same path python-dotenv would.
+TARGET_ADDR=""
+TARGET_NS=""
+if [ "$mode" = "analytics" ] && [ -f apps/backend-temporal/.env ]; then
+  while IFS='=' read -r key value; do
+    value="${value%\"}"; value="${value#\"}"
+    value="${value%\'}"; value="${value#\'}"
+    case "$key" in
+      TEMPORAL_ADDRESS) TARGET_ADDR="$value" ;;
+      TEMPORAL_NAMESPACE) TARGET_NS="$value" ;;
+    esac
+  done < <(grep -v "^[[:space:]]*#" apps/backend-temporal/.env | grep "=")
+fi
+# voice-terminal hardcodes localhost:7233 in worker.py / main_temporal.py.
+[ "$mode" = "voice" ] && TARGET_ADDR="localhost:7233"
+TARGET_ADDR="${TARGET_ADDR:-localhost:7233}"
+case "$TARGET_ADDR" in
+  localhost:*|127.0.0.1:*) USE_LOCAL_TEMPORAL=true ;;
+  *) USE_LOCAL_TEMPORAL=false ;;
+esac
 command -v uv >/dev/null || {
   echo "[run-demo] 'uv' not found. https://docs.astral.sh/uv/" >&2
   exit 1
@@ -75,24 +91,28 @@ fi
 
 # ---- Temporal dev server --------------------------------------------------
 
-if temporal operator namespace list >/dev/null 2>&1; then
-  echo "[temporal] already reachable on 127.0.0.1:7233 (using existing server)"
-else
-  echo "[temporal] starting dev server (log: $LOG_DIR/temporal.log)..."
-  ( temporal server start-dev > "$LOG_DIR/temporal.log" 2>&1 ) &
-  PIDS+=("$!")
-  for _ in $(seq 1 60); do
-    if temporal operator namespace list >/dev/null 2>&1; then
-      echo "[temporal] ready (UI: http://localhost:8233)"
-      break
+if [ "$USE_LOCAL_TEMPORAL" = true ]; then
+  if temporal operator namespace list >/dev/null 2>&1; then
+    echo "[temporal] already reachable on $TARGET_ADDR (using existing server)"
+  else
+    echo "[temporal] starting dev server (log: $LOG_DIR/temporal.log)..."
+    ( temporal server start-dev > "$LOG_DIR/temporal.log" 2>&1 ) &
+    PIDS+=("$!")
+    for _ in $(seq 1 60); do
+      if temporal operator namespace list >/dev/null 2>&1; then
+        echo "[temporal] ready (UI: http://localhost:8233)"
+        break
+      fi
+      sleep 0.5
+    done
+    if ! temporal operator namespace list >/dev/null 2>&1; then
+      echo "[temporal] failed to start; tail of $LOG_DIR/temporal.log:" >&2
+      tail -n 20 "$LOG_DIR/temporal.log" >&2 || true
+      exit 1
     fi
-    sleep 0.5
-  done
-  if ! temporal operator namespace list >/dev/null 2>&1; then
-    echo "[temporal] failed to start; tail of $LOG_DIR/temporal.log:" >&2
-    tail -n 20 "$LOG_DIR/temporal.log" >&2 || true
-    exit 1
   fi
+else
+  echo "[temporal] target is remote ($TARGET_ADDR); not starting a local dev server"
 fi
 
 # ---- Workspace deps -------------------------------------------------------
@@ -116,8 +136,8 @@ if [ "$mode" = "analytics" ]; then
   echo
   echo "============================================================"
   echo "  Analytics demo: http://localhost:3001"
-  echo "  Temporal UI:    http://localhost:8233"
-  echo "  Temporal addr:  localhost:7233 (overrides .env)"
+  echo "  Temporal:       $TARGET_ADDR ${TARGET_NS:+(namespace: $TARGET_NS) }$([ "$USE_LOCAL_TEMPORAL" = true ] && echo "[local dev]" || echo "[remote, per .env]")"
+  [ "$USE_LOCAL_TEMPORAL" = true ] && echo "  Temporal UI:    http://localhost:8233"
   echo "  Press Ctrl+C to stop everything this script started."
   echo "============================================================"
   wait
@@ -129,8 +149,8 @@ if [ "$mode" = "voice" ]; then
   echo
   echo "============================================================"
   echo "  Voice worker running."
+  echo "  Temporal:       $TARGET_ADDR [local dev, hardcoded in worker]"
   echo "  Temporal UI:    http://localhost:8233"
-  echo "  Temporal addr:  localhost:7233 (overrides .env)"
   echo "  In a second terminal, run the voice client:"
   echo "      cd apps/voice-terminal && uv run python -m src.main_temporal"
   echo "  Press Ctrl+C here to stop the worker."
