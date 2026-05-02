@@ -52,6 +52,14 @@ command -v temporal >/dev/null || {
   echo "[run-demo] 'temporal' CLI not found. brew install temporal (macOS)." >&2
   exit 1
 }
+
+# Pin every spawned process to the local dev server, even if a per-app
+# .env points at Temporal Cloud. python-dotenv's load_dotenv(override=False)
+# (the default) won't overwrite these, so workers + BFF use local Temporal.
+# Bypass the script if you want to demo against Cloud.
+export TEMPORAL_ADDRESS="localhost:7233"
+export TEMPORAL_NAMESPACE="default"
+export TEMPORAL_API_KEY=""
 command -v uv >/dev/null || {
   echo "[run-demo] 'uv' not found. https://docs.astral.sh/uv/" >&2
   exit 1
@@ -109,6 +117,7 @@ if [ "$mode" = "analytics" ]; then
   echo "============================================================"
   echo "  Analytics demo: http://localhost:3001"
   echo "  Temporal UI:    http://localhost:8233"
+  echo "  Temporal addr:  localhost:7233 (overrides .env)"
   echo "  Press Ctrl+C to stop everything this script started."
   echo "============================================================"
   wait
@@ -119,7 +128,9 @@ if [ "$mode" = "voice" ]; then
 
   echo
   echo "============================================================"
-  echo "  Voice worker running. Temporal UI: http://localhost:8233"
+  echo "  Voice worker running."
+  echo "  Temporal UI:    http://localhost:8233"
+  echo "  Temporal addr:  localhost:7233 (overrides .env)"
   echo "  In a second terminal, run the voice client:"
   echo "      cd apps/voice-terminal && uv run python -m src.main_temporal"
   echo "  Press Ctrl+C here to stop the worker."
