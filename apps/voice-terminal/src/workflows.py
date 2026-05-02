@@ -49,9 +49,9 @@ class VoiceAnalyticsWorkflow:
         self._messages: list[dict] = state.messages
         self._response_id: str | None = state.response_id
         self._schema: str | None = state.db_schema
-        self._closed: bool = False
+        self._closed: bool = state.closed
         self._turn_active: bool = False
-        self._pending_audio: str | None = None
+        self._pending_audio: str | None = state.pending_audio
 
     # -- helpers --
 
@@ -112,12 +112,29 @@ class VoiceAnalyticsWorkflow:
 
             self._turn_active = False
 
-            if workflow.info().is_continue_as_new_suggested():
+            if workflow.info().is_continue_as_new_suggested() and not self._closed:
+                # Wait for the client's per-turn truncate to catch up before
+                # snapshotting. Without this, the un-acked audio for the just-
+                # finished turn rides into the CAN args and can exceed the
+                # ~4 MB Temporal payload limit (max_output_tokens=700 allows
+                # ~11 MB on the wire). When the in-memory log is empty,
+                # truncation has caught up to whatever's been published.
+                await workflow.wait_condition(
+                    lambda: len(self.stream._log) == 0 or self._closed
+                )
+                if self._closed:
+                    return
+                # closed/pending_audio reflect any signals processed during
+                # the wait above — they're carried into the new run so a
+                # close_session or start_turn arriving in the handoff window
+                # isn't dropped.
                 await self.stream.continue_as_new(lambda state: [VoiceWorkflowState(
                     messages=self._messages,
                     response_id=self._response_id,
                     db_schema=self._schema,
                     stream_state=state,
+                    pending_audio=self._pending_audio,
+                    closed=self._closed,
                 )])
 
     async def _run_turn(self, audio_b64: str) -> None:

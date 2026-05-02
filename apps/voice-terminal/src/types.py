@@ -11,6 +11,10 @@ class VoiceWorkflowState(BaseModel):
     response_id: str | None = None
     db_schema: str | None = None
     stream_state: WorkflowStreamState | None = None
+    # Carried across CAN so a start_turn or close_session that arrives in the
+    # handoff window is honored by the new run instead of being silently lost.
+    pending_audio: str | None = None
+    closed: bool = False
 
 
 class StartTurnInput(BaseModel):

@@ -84,6 +84,17 @@ traffic low. With `max_output_tokens` bounding each turn's audio, at most
 one turn's worth of un-acked audio (~10 MB upper bound on the wire) is
 ever in the live stream.
 
+**CAN waits for truncation to catch up.** A turn's audio sits un-acked
+in the live stream until the client finishes playback and signals
+`truncate`. The CAN trigger therefore waits for `len(stream._log) == 0`
+before snapshotting — otherwise the un-acked audio rides into the new
+run's args and risks exceeding Temporal's per-payload limit (~4 MB,
+which is below the per-turn cap of ~11 MB at 700 tokens). Signals that
+land in the handoff window (`close_session`, `start_turn`) are
+preserved by carrying `closed` and `pending_audio` in
+`VoiceWorkflowState`, so neither shutdown requests nor in-flight turns
+are dropped across CAN.
+
 ## Per-turn Bandwidth Bound
 
 `max_output_tokens=700` on the OpenAI Responses API call gives a hard
