@@ -42,8 +42,14 @@ async function proxyRequest(req: NextRequest) {
           if (done) break;
           await writer.write(value);
         }
+      } catch {
+        // Client disconnected mid-stream; downstream writable is already closed.
       } finally {
-        await writer.close();
+        try {
+          await writer.close();
+        } catch {
+          // Already closed by the client disconnect cascade.
+        }
       }
     })();
 

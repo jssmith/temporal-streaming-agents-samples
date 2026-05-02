@@ -5,9 +5,15 @@ import { defineConfig } from "@playwright/test";
 // The frontend runs on 3001 (its only supported port) with BACKEND_URL
 // pointed at the Temporal BFF.
 //
-// Requires a reachable Temporal cluster — backend-temporal/.env defaults to
-// Temporal Cloud; a local dev server on 127.0.0.1:7233 also works if env vars
-// are unset.
+// Targets a local Temporal dev server on 127.0.0.1:7233 — env overrides
+// below take precedence over backend-temporal/.env (which points at Cloud).
+// Start one with: temporal server start-dev
+const localTemporalEnv = {
+  TEMPORAL_ADDRESS: "localhost:7233",
+  TEMPORAL_NAMESPACE: "default",
+  TEMPORAL_API_KEY: "",
+};
+
 export default defineConfig({
   testDir: "./tests/e2e",
   timeout: 180_000,
@@ -25,6 +31,7 @@ export default defineConfig({
       port: 8001,
       timeout: 60_000,
       reuseExistingServer: !process.env.CI,
+      env: localTemporalEnv,
     },
     {
       command: "cd frontend && BACKEND_URL=http://localhost:8001 npm run dev",
