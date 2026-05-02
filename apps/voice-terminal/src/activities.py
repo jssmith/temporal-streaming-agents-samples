@@ -82,6 +82,12 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
         "tools": input.tools,
         "input": input.input_messages,
         "store": True,
+        # Bound the per-turn audio at ~10 MB on the wire. TTS-1 PCM is
+        # 48 KB/s raw; base64'd in our publish envelope it's ~64 KB/s.
+        # 700 tokens ≈ 2700 chars ≈ 180 s of speech ≈ 11.5 MB base64'd —
+        # comfortably under Temporal's payload soft warning when paired
+        # with per-turn truncation on the client.
+        "max_output_tokens": 700,
     }
     if input.previous_response_id:
         kwargs["previous_response_id"] = input.previous_response_id
