@@ -22,11 +22,35 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [appState, setAppState] = useState<AppState>("idle");
   const [queuedMessage, setQueuedMessage] = useState<string | null>(null);
+  const [isSessionLoading, setIsSessionLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const sessionLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const [chatState, dispatch] = useReducer(chatReducer, initialChatState);
+
+  function clearSessionLoading() {
+    if (sessionLoadingTimerRef.current) {
+      clearTimeout(sessionLoadingTimerRef.current);
+      sessionLoadingTimerRef.current = null;
+    }
+    setIsSessionLoading(false);
+  }
+
+  // Clear the loading state as soon as the next session has content to
+  // render. We don't need to wait for the full stream to finish.
+  useEffect(() => {
+    if (chatState.messages.length > 0 || chatState.currentTurn.steps.length > 0) {
+      clearSessionLoading();
+    }
+  }, [chatState.messages.length, chatState.currentTurn.steps.length]);
+
+  useEffect(() => {
+    return () => {
+      if (sessionLoadingTimerRef.current) clearTimeout(sessionLoadingTimerRef.current);
+    };
+  }, []);
 
   // Auto-scroll
   useEffect(() => {
@@ -82,8 +106,10 @@ export default function Home() {
             }
           }
         }
+        clearSessionLoading();
         setAppState("idle");
       } catch (err: unknown) {
+        clearSessionLoading();
         if (err instanceof Error && err.name === "AbortError") {
           setAppState("idle");
         } else {
@@ -99,6 +125,13 @@ export default function Home() {
     abortRef.current?.abort(); // Cancel any in-flight connection (strict mode double-mount)
     dispatch({ type: "CLEAR" });
 
+    // Schedule a "Loading…" indicator that only appears if the load takes
+    // long enough that a blank screen would feel broken. Cleared by the
+    // useEffect above as soon as the next session has any content, or in
+    // consumeSSEStream when the stream ends.
+    clearSessionLoading();
+    sessionLoadingTimerRef.current = setTimeout(() => setIsSessionLoading(true), 250);
+
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -110,6 +143,7 @@ export default function Home() {
         consumeSSEStream(res.body!.getReader());
       })
       .catch((err) => {
+        clearSessionLoading();
         if (!(err instanceof Error && err.name === "AbortError")) {
           setAppState("error");
         }
@@ -285,6 +319,12 @@ export default function Home() {
         {/* Messages */}
         <main className="flex-1 overflow-y-auto px-6 pb-4">
           <div className="max-w-[800px] mx-auto">
+            {isSessionLoading && isEmptyChat && !showSuggestedPrompts && (
+              <div className="flex flex-col items-center justify-center h-[calc(100vh-140px)]">
+                <div className="text-gray-500 text-sm animate-pulse">Loading conversation…</div>
+              </div>
+            )}
+
             {showSuggestedPrompts && (
               <div className="flex flex-col items-center justify-center h-[calc(100vh-140px)] gap-6">
                 <p className="text-gray-500 text-sm">Ask anything about the Chinook music store database</p>
