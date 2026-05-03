@@ -8,7 +8,7 @@ streaming architecture, see the [top-level README](../../README.md).
 ```
 apps/backend-temporal/
 └── src/
-    ├── main.py            # FastAPI BFF (stateless proxy)
+    ├── main.py            # FastAPI backend-for-frontend (BFF, stateless proxy)
     ├── workflows.py       # Temporal workflow (agent loop + state)
     ├── activities.py      # LLM calls + tool execution
     ├── types.py           # Pydantic models (workflow contract)
