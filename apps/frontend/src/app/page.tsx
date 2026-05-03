@@ -59,14 +59,17 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const previousActiveSessionIdRef = useRef<string | null>(null);
-  // Mirror activeSessionId so async stream callbacks see the current value,
-  // not the one captured when the callback was created. Without this the
-  // mount-effect's first stream captures activeSessionId === null and
-  // never clears the loading indicator on the user's view.
+  // Mirror activeSessionId so async stream callbacks see the current value
+  // instead of the one captured when the callback was created. Critically,
+  // we update the ref synchronously inside setActive() rather than via a
+  // useEffect — a useEffect lags by one render commit, leaving a same-tick
+  // window where a fast stream failure right after a session switch could
+  // still see the old id and miss the loading-indicator clear.
   const activeSessionIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    activeSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
+  function setActive(id: string | null) {
+    activeSessionIdRef.current = id;
+    setActiveSessionId(id);
+  }
 
   // Loading indicator (shown if a fresh stream takes longer than ~250 ms
   // to deliver its first event). Cached restores never show it.
@@ -244,7 +247,7 @@ export default function Home() {
         setSessions(tabs);
         if (tabs.length > 0) {
           const first = tabs[0].sessionId;
-          setActiveSessionId(first);
+          setActive(first);
           ensureSessionStream(first);
           startLoadingIndicator(first);
         }
@@ -296,7 +299,7 @@ export default function Home() {
   // --- Session management ---------------------------------------------------
 
   function createNewSession() {
-    setActiveSessionId(null);
+    setActive(null);
     setInput("");
     setQueuedMessage(null);
     clearSessionLoading();
@@ -309,11 +312,11 @@ export default function Home() {
       if (sessionId === activeSessionId) {
         if (updated.length > 0) {
           const next = updated[0].sessionId;
-          setActiveSessionId(next);
+          setActive(next);
           ensureSessionStream(next);
           startLoadingIndicator(next);
         } else {
-          setActiveSessionId(null);
+          setActive(null);
         }
       }
       return updated;
@@ -330,7 +333,7 @@ export default function Home() {
   }
 
   function switchToSession(sessionId: string) {
-    setActiveSessionId(sessionId);
+    setActive(sessionId);
     setInput("");
     setQueuedMessage(null);
     // Touch the LRU if cached. ensureSessionStream is idempotent — it skips
@@ -356,7 +359,7 @@ export default function Home() {
         sessionId = data.session_id as string;
         const newSession: SessionTab = { sessionId, preview: text.slice(0, 80), messageCount: 0 };
         setSessions(prev => [newSession, ...prev]);
-        setActiveSessionId(sessionId);
+        setActive(sessionId);
         // Seed an empty runtime so the dispatches below have something to update.
         setRuntimes(prev => {
           const next = new Map(prev);
