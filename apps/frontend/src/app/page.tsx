@@ -59,6 +59,14 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const previousActiveSessionIdRef = useRef<string | null>(null);
+  // Mirror activeSessionId so async stream callbacks see the current value,
+  // not the one captured when the callback was created. Without this the
+  // mount-effect's first stream captures activeSessionId === null and
+  // never clears the loading indicator on the user's view.
+  const activeSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   // Loading indicator (shown if a fresh stream takes longer than ~250 ms
   // to deliver its first event). Cached restores never show it.
@@ -82,19 +90,25 @@ export default function Home() {
   // --- Per-session map updates ----------------------------------------------
 
   // Atomic update: read the current runtime, return a new one (or undefined
-  // to delete). Touches the LRU order by re-inserting at the end.
+  // to delete). No-op if the session has been evicted/deleted — we don't
+  // resurrect zombie runtimes from late stream-teardown callbacks. Touches
+  // the LRU order by re-inserting at the end.
   function updateRuntime(
     sessionId: string,
     updater: (current: SessionRuntime) => SessionRuntime | undefined,
   ) {
     setRuntimes(prev => {
-      const current = prev.get(sessionId) ?? newRuntime();
+      const current = prev.get(sessionId);
+      if (current === undefined) return prev;
       const result = updater(current);
+      if (result === undefined) {
+        const next = new Map(prev);
+        next.delete(sessionId);
+        return next;
+      }
       const next = new Map(prev);
       next.delete(sessionId);
-      if (result !== undefined) {
-        next.set(sessionId, result);
-      }
+      next.set(sessionId, result);
       return next;
     });
   }
@@ -144,9 +158,9 @@ export default function Home() {
           }
         }
         setAppStateFor(sessionId, "idle");
-        if (sessionId === activeSessionId) clearSessionLoading();
+        if (sessionId === activeSessionIdRef.current) clearSessionLoading();
       } catch (err: unknown) {
-        if (sessionId === activeSessionId) clearSessionLoading();
+        if (sessionId === activeSessionIdRef.current) clearSessionLoading();
         if (err instanceof Error && err.name === "AbortError") {
           setAppStateFor(sessionId, "idle");
         } else {
@@ -208,7 +222,7 @@ export default function Home() {
         consumeSSEStream(sessionId, res.body!.getReader());
       })
       .catch(err => {
-        if (sessionId === activeSessionId) clearSessionLoading();
+        if (sessionId === activeSessionIdRef.current) clearSessionLoading();
         if (!(err instanceof Error && err.name === "AbortError")) {
           setAppStateFor(sessionId, "error");
         }
@@ -319,12 +333,14 @@ export default function Home() {
     setActiveSessionId(sessionId);
     setInput("");
     setQueuedMessage(null);
-    // Touch the LRU even if cached; ensure stream if not.
+    // Touch the LRU if cached. ensureSessionStream is idempotent — it skips
+    // sessions with an in-flight controller or cached content, but re-opens
+    // a runtime that exists with empty state and no controller (e.g. left
+    // over from an earlier failed fetch).
     if (runtimesRef.current.has(sessionId)) {
       updateRuntime(sessionId, current => current);
-    } else {
-      ensureSessionStream(sessionId);
     }
+    ensureSessionStream(sessionId);
     startLoadingIndicator(sessionId);
     setTimeout(() => inputRef.current?.focus(), 50);
   }
