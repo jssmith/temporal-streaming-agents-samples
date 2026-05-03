@@ -15,6 +15,9 @@ node_modules/
 # Test artifacts
 test-results/
 
+# scripts/run-demo.sh log directory
+.run-demo/
+
 # Environment
 .env
 

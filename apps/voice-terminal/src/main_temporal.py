@@ -1,0 +1,171 @@
+"""Temporal voice analytics agent — terminal client.
+
+Usage:
+    # Terminal 1: Start worker
+    uv run python -m src.worker
+
+    # Terminal 2: Start client
+    uv run python -m src.main_temporal
+"""
+
+import asyncio
+import base64
+import logging
+import sys
+import uuid
+
+from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.contrib.workflow_streams import WorkflowStreamClient
+from temporalio.service import RPCError, RPCStatusCode
+
+from .audio import AudioPlayer, print_audio_devices, record_until_silence
+from .display import (
+    print_banner,
+    print_listening,
+    print_response,
+    print_status,
+    print_tool_call,
+    print_transcript,
+)
+from analytics_shared.constants import AUDIO_TOPIC, EVENTS_TOPIC
+
+from .types import StartTurnInput, VoiceWorkflowState
+from .workflows import VoiceAnalyticsWorkflow
+
+logger = logging.getLogger(__name__)
+
+TASK_QUEUE = "voice-analytics"
+
+
+async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+
+    print_banner()
+    print("  (Temporal mode)")
+    print_audio_devices()
+
+    client = await Client.connect(
+        "localhost:7233",
+        data_converter=pydantic_data_converter,
+    )
+
+    session_id = f"voice-{uuid.uuid4().hex[:8]}"
+    handle = await client.start_workflow(
+        VoiceAnalyticsWorkflow.run,
+        VoiceWorkflowState(),
+        id=session_id,
+        task_queue=TASK_QUEUE,
+    )
+    logger.info("Started workflow %s", session_id)
+
+    stream = WorkflowStreamClient.create(client, session_id)
+    player = AudioPlayer()
+    last_offset = 0
+    session_ended_by_agent = False
+
+    try:
+        while True:
+            # 1. LISTEN
+            print_listening()
+            try:
+                audio_bytes = await record_until_silence()
+            except KeyboardInterrupt:
+                break
+            if not audio_bytes:
+                logger.info("No speech detected, listening again")
+                continue
+
+            # 2. SEND to workflow
+            audio_b64 = base64.b64encode(audio_bytes).decode()
+            try:
+                await handle.signal(
+                    VoiceAnalyticsWorkflow.start_turn,
+                    StartTurnInput(audio_base64=audio_b64),
+                )
+            except RPCError as e:
+                if e.status == RPCStatusCode.NOT_FOUND:
+                    print("\n[Workflow already ended.]")
+                    break
+                raise
+
+            # 3. RECEIVE events + audio until TURN_COMPLETE
+            player.start()
+            async for item in stream.subscribe(
+                topics=[AUDIO_TOPIC, EVENTS_TOPIC],
+                from_offset=last_offset,
+                result_type=dict,
+            ):
+                last_offset = item.offset + 1
+
+                if item.topic == AUDIO_TOPIC:
+                    payload = item.data
+                    pcm = base64.b64decode(payload["audio_base64"])
+                    player.enqueue(pcm)
+
+                elif item.topic == EVENTS_TOPIC:
+                    event = item.data
+                    event_type = event.get("type")
+                    data = event.get("data", {})
+
+                    if event_type == "TRANSCRIPT":
+                        print_transcript(data.get("text", ""))
+                    elif event_type == "STATUS":
+                        print_status(data.get("text", ""))
+                    elif event_type == "TOOL_CALL":
+                        print_tool_call(
+                            data.get("name", ""),
+                            data.get("arguments", {}),
+                            data.get("result", {}),
+                        )
+                    elif event_type == "RESPONSE_TEXT":
+                        print_response(data.get("text", ""))
+                    elif event_type == "SESSION_CLOSED":
+                        # Don't break here — wait for TURN_COMPLETE so any
+                        # trailing audio is enqueued for playback first.
+                        session_ended_by_agent = True
+                    elif event_type == "TURN_COMPLETE":
+                        break
+
+            # 4. WAIT for playback to finish, then ack the consumed range so
+            #    the workflow can drop the audio bytes from its live stream.
+            #    Per-turn truncation: bounded by max_output_tokens at the
+            #    activity, so at most ~10 MB of un-acked audio at any time.
+            await player.wait_until_done()
+            player.stop()
+            if last_offset > 0:
+                try:
+                    await handle.signal(
+                        VoiceAnalyticsWorkflow.truncate, last_offset
+                    )
+                except RPCError as e:
+                    if e.status != RPCStatusCode.NOT_FOUND:
+                        raise
+
+            if session_ended_by_agent:
+                print("\n[Session ended by agent.]")
+                break
+
+    finally:
+        if not session_ended_by_agent:
+            try:
+                await handle.signal(VoiceAnalyticsWorkflow.close_session)
+            except RPCError as e:
+                if e.status != RPCStatusCode.NOT_FOUND:
+                    raise
+        print("\nGoodbye!")
+
+
+def main_entry() -> None:
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nGoodbye!")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main_entry()

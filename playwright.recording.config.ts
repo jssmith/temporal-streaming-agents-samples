@@ -52,7 +52,7 @@ export default defineConfig({
   webServer: [
     {
       // Temporal worker — runs the agent workflows
-      command: "cd backend-temporal && uv run python -m src.worker",
+      command: "cd apps/backend-temporal && uv run python -m src.worker",
       port: 7233, // waits for Temporal server (must be started separately)
       timeout: 30_000,
       reuseExistingServer: true, // worker doesn't bind a port; just check Temporal is up
@@ -60,14 +60,14 @@ export default defineConfig({
     {
       // Temporal BFF — stateless proxy between frontend and Temporal
       command:
-        "cd backend-temporal && uv run uvicorn src.main:app --port 8001",
+        "cd apps/backend-temporal && uv run uvicorn src.main:app --port 8001",
       port: 8001,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
     },
     {
       // Frontend — points to the temporal backend (port 8001 is the default)
-      command: "cd frontend && npm run dev",
+      command: "cd apps/frontend && npm run dev",
       port: 3001,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
