@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useReducer } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { UserMessage, AgentMessage } from "./components/ChatMessage";
 import Sidebar, { SessionTab } from "./components/Sidebar";
-import { chatReducer, initialChatState, SSEEvent } from "../lib/chatReducer";
+import { chatReducer, initialChatState, ChatState, ChatAction, SSEEvent } from "../lib/chatReducer";
 import { processEvent, AppState } from "../lib/processEvent";
 
 const SUGGESTED_PROMPTS = [
@@ -14,21 +14,56 @@ const SUGGESTED_PROMPTS = [
   "Find the top 5 artists by track count and revenue side by side",
 ];
 
+// Up to this many recent sessions are kept hot in memory. Streams stay open
+// for in-flight turns even on background tabs, so flipping back to a tab is
+// instant and any progress that arrived while you were elsewhere is already
+// applied. Older sessions are evicted (their streams aborted).
+const MAX_CACHED_SESSIONS = 5;
+
+// Per-session runtime: the cached chat state, its appState, and (if a stream
+// is currently open) an AbortController for the in-flight /run or /stream
+// fetch. A session has at most one open stream at a time — sending a new
+// message aborts the prior one before opening /run.
+type SessionRuntime = {
+  chatState: ChatState;
+  appState: AppState;
+  controller: AbortController | null;
+};
+
+const newRuntime = (): SessionRuntime => ({
+  chatState: initialChatState,
+  appState: "idle",
+  controller: null,
+});
+
 // --- Main Page ---
 
 export default function Home() {
   const [sessions, setSessions] = useState<SessionTab[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
-  const [appState, setAppState] = useState<AppState>("idle");
   const [queuedMessage, setQueuedMessage] = useState<string | null>(null);
-  const [isSessionLoading, setIsSessionLoading] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const sessionLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Map keyed by sessionId, ordered most-recently-used last so the first
+  // entry is the eviction target.
+  const [runtimes, setRuntimes] = useState<Map<string, SessionRuntime>>(
+    () => new Map(),
+  );
+  // Mirror of `runtimes` that callbacks can read synchronously without
+  // depending on stale closure values.
+  const runtimesRef = useRef(runtimes);
+  useEffect(() => {
+    runtimesRef.current = runtimes;
+  }, [runtimes]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const previousActiveSessionIdRef = useRef<string | null>(null);
 
-  const [chatState, dispatch] = useReducer(chatReducer, initialChatState);
+  // Loading indicator (shown if a fresh stream takes longer than ~250 ms
+  // to deliver its first event). Cached restores never show it.
+  const [isSessionLoading, setIsSessionLoading] = useState(false);
+  const sessionLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function clearSessionLoading() {
     if (sessionLoadingTimerRef.current) {
@@ -38,51 +73,49 @@ export default function Home() {
     setIsSessionLoading(false);
   }
 
-  // Clear the loading state as soon as the next session has content to
-  // render. We don't need to wait for the full stream to finish.
-  useEffect(() => {
-    if (chatState.messages.length > 0 || chatState.currentTurn.steps.length > 0) {
-      clearSessionLoading();
-    }
-  }, [chatState.messages.length, chatState.currentTurn.steps.length]);
+  // Active runtime drives all rendering. Defaults are "show nothing" so the
+  // initial empty state and the new-chat state collapse to the same render.
+  const activeRuntime = activeSessionId ? runtimes.get(activeSessionId) : undefined;
+  const chatState = activeRuntime?.chatState ?? initialChatState;
+  const appState = activeRuntime?.appState ?? "idle";
 
-  useEffect(() => {
-    return () => {
-      if (sessionLoadingTimerRef.current) clearTimeout(sessionLoadingTimerRef.current);
-    };
-  }, []);
+  // --- Per-session map updates ----------------------------------------------
 
-  // Auto-scroll
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatState.messages, chatState.currentTurn.steps]);
-
-  // Fetch session list from backend on mount
-  useEffect(() => {
-    fetch("/api/sessions")
-      .then((res) => res.json())
-      .then((data: { session_id: string; message_count: number; preview: string }[]) => {
-        const tabs: SessionTab[] = data.map((s) => ({
-          sessionId: s.session_id,
-          preview: s.preview,
-          messageCount: s.message_count,
-        }));
-        setSessions(tabs);
-        if (tabs.length > 0) {
-          setActiveSessionId(tabs[0].sessionId);
-          connectToStream(tabs[0].sessionId);
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  // --- SSE processing ---
-
-  function handleEvent(event: SSEEvent) {
-    processEvent(event, dispatch, setAppState);
+  // Atomic update: read the current runtime, return a new one (or undefined
+  // to delete). Touches the LRU order by re-inserting at the end.
+  function updateRuntime(
+    sessionId: string,
+    updater: (current: SessionRuntime) => SessionRuntime | undefined,
+  ) {
+    setRuntimes(prev => {
+      const current = prev.get(sessionId) ?? newRuntime();
+      const result = updater(current);
+      const next = new Map(prev);
+      next.delete(sessionId);
+      if (result !== undefined) {
+        next.set(sessionId, result);
+      }
+      return next;
+    });
   }
 
-  function consumeSSEStream(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  function dispatchToSession(sessionId: string, action: ChatAction) {
+    updateRuntime(sessionId, current => ({
+      ...current,
+      chatState: chatReducer(current.chatState, action),
+    }));
+  }
+
+  function setAppStateFor(sessionId: string, appState: AppState) {
+    updateRuntime(sessionId, current => ({ ...current, appState }));
+  }
+
+  // --- SSE consumption ------------------------------------------------------
+
+  function consumeSSEStream(
+    sessionId: string,
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+  ) {
     const decoder = new TextDecoder();
     let buffer = "";
 
@@ -100,99 +133,199 @@ export default function Home() {
             if (!chunk.startsWith("data: ")) continue;
             try {
               const event: SSEEvent = JSON.parse(chunk.slice(6));
-              handleEvent(event);
+              processEvent(
+                event,
+                action => dispatchToSession(sessionId, action),
+                state => setAppStateFor(sessionId, state),
+              );
             } catch {
               // skip malformed events
             }
           }
         }
-        clearSessionLoading();
-        setAppState("idle");
+        setAppStateFor(sessionId, "idle");
+        if (sessionId === activeSessionId) clearSessionLoading();
       } catch (err: unknown) {
-        clearSessionLoading();
+        if (sessionId === activeSessionId) clearSessionLoading();
         if (err instanceof Error && err.name === "AbortError") {
-          setAppState("idle");
+          setAppStateFor(sessionId, "idle");
         } else {
-          setAppState("error");
+          setAppStateFor(sessionId, "error");
         }
+      } finally {
+        // Stream is done; clear the controller so a future send doesn't try
+        // to abort an already-finished fetch.
+        updateRuntime(sessionId, current => ({ ...current, controller: null }));
       }
     })();
   }
 
-  // --- Session management ---
+  // --- Stream lifecycle -----------------------------------------------------
 
-  function connectToStream(sessionId: string) {
-    abortRef.current?.abort(); // Cancel any in-flight connection (strict mode double-mount)
-    dispatch({ type: "CLEAR" });
-
-    // Schedule a "Loading…" indicator that only appears if the load takes
-    // long enough that a blank screen would feel broken. Cleared by the
-    // useEffect above as soon as the next session has any content, or in
-    // consumeSSEStream when the stream ends.
-    clearSessionLoading();
-    sessionLoadingTimerRef.current = setTimeout(() => setIsSessionLoading(true), 250);
+  // Open a /stream subscription for a session that's not yet streaming.
+  // Re-opens if a prior stream was aborted before any content arrived
+  // (e.g. StrictMode dev double-mount); skips if already streaming or
+  // already populated.
+  function ensureSessionStream(sessionId: string) {
+    const existing = runtimesRef.current.get(sessionId);
+    if (existing) {
+      if (existing.controller) return; // stream already in flight
+      const hasContent =
+        existing.chatState.messages.length > 0 ||
+        existing.chatState.currentTurn.steps.length > 0;
+      if (hasContent) return; // already populated; no need to re-stream
+    }
 
     const controller = new AbortController();
-    abortRef.current = controller;
+    let opened = false;
+    setRuntimes(prev => {
+      const next = new Map(prev);
+      const cur = next.get(sessionId);
+      // Race-safe: if another caller already opened a stream, leave it.
+      if (cur?.controller) return prev;
+      opened = true;
+      while (next.size >= MAX_CACHED_SESSIONS && !next.has(sessionId)) {
+        const oldest = next.keys().next().value;
+        if (oldest === undefined) break;
+        next.get(oldest)?.controller?.abort();
+        next.delete(oldest);
+      }
+      const seed = cur ?? newRuntime();
+      next.delete(sessionId);
+      next.set(sessionId, { ...seed, controller });
+      return next;
+    });
+    if (!opened) {
+      controller.abort();
+      return;
+    }
 
     fetch(`/api/sessions/${sessionId}/stream?from_index=0`, {
       signal: controller.signal,
     })
-      .then((res) => {
+      .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        consumeSSEStream(res.body!.getReader());
+        consumeSSEStream(sessionId, res.body!.getReader());
       })
-      .catch((err) => {
-        clearSessionLoading();
+      .catch(err => {
+        if (sessionId === activeSessionId) clearSessionLoading();
         if (!(err instanceof Error && err.name === "AbortError")) {
-          setAppState("error");
+          setAppStateFor(sessionId, "error");
         }
+        updateRuntime(sessionId, current => ({ ...current, controller: null }));
       });
   }
 
+  // --- Initial session list -------------------------------------------------
+
+  useEffect(() => {
+    fetch("/api/sessions")
+      .then(res => res.json())
+      .then((data: { session_id: string; message_count: number; preview: string }[]) => {
+        const tabs: SessionTab[] = data.map(s => ({
+          sessionId: s.session_id,
+          preview: s.preview,
+          messageCount: s.message_count,
+        }));
+        setSessions(tabs);
+        if (tabs.length > 0) {
+          const first = tabs[0].sessionId;
+          setActiveSessionId(first);
+          ensureSessionStream(first);
+          startLoadingIndicator(first);
+        }
+      })
+      .catch(() => {});
+    // Component-unmount cleanup: abort every active stream so nothing leaks.
+    return () => {
+      runtimesRef.current.forEach(rt => rt.controller?.abort());
+      if (sessionLoadingTimerRef.current) clearTimeout(sessionLoadingTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Scroll: instant on session switch, smooth on incoming content -------
+
+  useEffect(() => {
+    const previous = previousActiveSessionIdRef.current;
+    previousActiveSessionIdRef.current = activeSessionId;
+    if (!messagesEndRef.current) return;
+    const sessionSwitched = previous !== activeSessionId;
+    messagesEndRef.current.scrollIntoView({
+      behavior: sessionSwitched ? "instant" : "smooth",
+    });
+  }, [activeSessionId, chatState.messages.length, chatState.currentTurn.steps.length]);
+
+  // --- Loading indicator ---------------------------------------------------
+
+  // Only schedule the indicator when the session being switched to has no
+  // content yet. Cached sessions paint instantly and never need it.
+  function startLoadingIndicator(sessionId: string) {
+    clearSessionLoading();
+    const cached = runtimesRef.current.get(sessionId);
+    const hasContent =
+      cached &&
+      (cached.chatState.messages.length > 0 ||
+        cached.chatState.currentTurn.steps.length > 0);
+    if (hasContent) return;
+    sessionLoadingTimerRef.current = setTimeout(() => setIsSessionLoading(true), 250);
+  }
+
+  // Defensive auto-clear: if content starts flowing, hide the indicator
+  // even if the timeout already fired.
+  useEffect(() => {
+    if (chatState.messages.length > 0 || chatState.currentTurn.steps.length > 0) {
+      clearSessionLoading();
+    }
+  }, [activeSessionId, chatState.messages.length, chatState.currentTurn.steps.length]);
+
+  // --- Session management ---------------------------------------------------
+
   function createNewSession() {
-    abortRef.current?.abort();
-
     setActiveSessionId(null);
-    dispatch({ type: "CLEAR" });
     setInput("");
-    setAppState("idle");
     setQueuedMessage(null);
-
+    clearSessionLoading();
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
   function deleteSession(sessionId: string) {
-    setSessions((prev) => {
-      const updated = prev.filter((s) => s.sessionId !== sessionId);
-
+    setSessions(prev => {
+      const updated = prev.filter(s => s.sessionId !== sessionId);
       if (sessionId === activeSessionId) {
         if (updated.length > 0) {
-          setActiveSessionId(updated[0].sessionId);
-          connectToStream(updated[0].sessionId);
+          const next = updated[0].sessionId;
+          setActiveSessionId(next);
+          ensureSessionStream(next);
+          startLoadingIndicator(next);
         } else {
           setActiveSessionId(null);
-          dispatch({ type: "CLEAR" });
         }
       }
-
       return updated;
     });
-
+    // Drop the runtime and abort any in-flight stream for the deleted session.
+    setRuntimes(prev => {
+      const rt = prev.get(sessionId);
+      rt?.controller?.abort();
+      const next = new Map(prev);
+      next.delete(sessionId);
+      return next;
+    });
     fetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
   }
 
   function switchToSession(sessionId: string) {
-    if (appState === "running") {
-      abortRef.current?.abort();
-    }
-
     setActiveSessionId(sessionId);
     setInput("");
-    setAppState("idle");
     setQueuedMessage(null);
-    connectToStream(sessionId);
-
+    // Touch the LRU even if cached; ensure stream if not.
+    if (runtimesRef.current.has(sessionId)) {
+      updateRuntime(sessionId, current => current);
+    } else {
+      ensureSessionStream(sessionId);
+    }
+    startLoadingIndicator(sessionId);
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
@@ -206,22 +339,44 @@ export default function Home() {
         const data = await res.json();
         sessionId = data.session_id as string;
         const newSession: SessionTab = { sessionId, preview: text.slice(0, 80), messageCount: 0 };
-        setSessions((prev) => [newSession, ...prev]);
+        setSessions(prev => [newSession, ...prev]);
         setActiveSessionId(sessionId);
+        // Seed an empty runtime so the dispatches below have something to update.
+        setRuntimes(prev => {
+          const next = new Map(prev);
+          while (next.size >= MAX_CACHED_SESSIONS) {
+            const oldest = next.keys().next().value;
+            if (oldest === undefined) break;
+            next.get(oldest)?.controller?.abort();
+            next.delete(oldest);
+          }
+          next.set(sessionId!, newRuntime());
+          return next;
+        });
       }
+      const targetSessionId = sessionId;
 
-      // Optimistic: show user message immediately (deduped when event arrives)
-      dispatch({ type: "USER_MESSAGE", content: text });
-      // Optimistic: show thinking indicator while waiting for first event
-      dispatch({ type: "THINKING_START" });
+      // Abort any /stream that was open for this session before /run takes
+      // over. Two streams subscribing from the same offset would deliver
+      // duplicates.
+      const existing = runtimesRef.current.get(targetSessionId);
+      existing?.controller?.abort();
+
+      // Optimistic: show user message + thinking indicator immediately.
+      dispatchToSession(targetSessionId, { type: "USER_MESSAGE", content: text });
+      dispatchToSession(targetSessionId, { type: "THINKING_START" });
       setInput("");
-      setAppState("sending");
+      setAppStateFor(targetSessionId, "sending");
 
-      // Update sidebar preview if this is the first user message
-      if (chatState.messages.filter((m) => m.role === "user").length === 0) {
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.sessionId === sessionId
+      // Update sidebar preview if this is the first user message.
+      const cached = runtimesRef.current.get(targetSessionId);
+      const userMsgCount = cached
+        ? cached.chatState.messages.filter(m => m.role === "user").length
+        : 0;
+      if (userMsgCount === 0) {
+        setSessions(prev =>
+          prev.map(s =>
+            s.sessionId === targetSessionId
               ? { ...s, preview: text.slice(0, 80), messageCount: s.messageCount + 1 }
               : s
           )
@@ -229,10 +384,10 @@ export default function Home() {
       }
 
       const controller = new AbortController();
-      abortRef.current = controller;
+      updateRuntime(targetSessionId, current => ({ ...current, controller }));
 
       try {
-        const res = await fetch(`/api/sessions/${sessionId}/run`, {
+        const res = await fetch(`/api/sessions/${targetSessionId}/run`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: text }),
@@ -240,20 +395,20 @@ export default function Home() {
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        consumeSSEStream(res.body!.getReader());
+        consumeSSEStream(targetSessionId, res.body!.getReader());
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "AbortError") {
-          setAppState("idle");
+          setAppStateFor(targetSessionId, "idle");
         } else {
-          setAppState("error");
+          setAppStateFor(targetSessionId, "error");
         }
+        updateRuntime(targetSessionId, current => ({ ...current, controller: null }));
       }
     },
-    [activeSessionId, chatState.messages]
+    [activeSessionId]
   );
 
-  // Process a queued message after turn completes
+  // Process a queued message after the active session's turn completes.
   useEffect(() => {
     if (appState === "idle" && queuedMessage) {
       const msg = queuedMessage;
@@ -276,8 +431,8 @@ export default function Home() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Escape" && appState === "running") {
-      abortRef.current?.abort();
+    if (e.key === "Escape" && appState === "running" && activeSessionId) {
+      runtimesRef.current.get(activeSessionId)?.controller?.abort();
       fetch(`/api/sessions/${activeSessionId}/interrupt`, { method: "POST" });
       return;
     }
@@ -292,11 +447,9 @@ export default function Home() {
   }
 
   const isEmptyChat = chatState.messages.length === 0 && chatState.currentTurn.steps.length === 0;
-  // Only show the suggested-prompts picker for a brand-new chat (no session
-  // selected yet). When switching between existing sessions there's a brief
-  // window where messages are cleared but the next session's history hasn't
-  // streamed in; rendering the picker there flashed the menu before the
-  // conversation painted. For that window we want a blank canvas instead.
+  // Suggested-prompts picker is only meaningful for a brand-new chat
+  // (no session selected yet). Switching between existing sessions
+  // shows a blank canvas during any load gap.
   const showSuggestedPrompts = isEmptyChat && activeSessionId === null;
 
   return (
