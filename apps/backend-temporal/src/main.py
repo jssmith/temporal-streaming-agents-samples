@@ -227,9 +227,24 @@ async def interrupt_session(session_id: str):
 
 @app.get("/api/sessions/{session_id}/stream")
 async def stream_events(session_id: str, from_index: int = 0):
-    """Resume streaming events for an in-progress turn."""
+    """Replay events from from_index, then drain or stay open for a live turn.
+
+    A naive "stop at AGENT_COMPLETE" would close after the first turn, hiding
+    every later turn from a reloaded client. Snapshot the offset boundary at
+    open time and the workflow's turn_in_progress flag, so we can: replay all
+    historical events past prior AGENT_COMPLETEs; close once caught up if
+    nothing live is expected; otherwise stay open until the live turn ends.
+    """
     client = await get_client()
+    handle = client.get_workflow_handle(session_id)
     stream = WorkflowStreamClient.create(client, session_id)
+
+    end_offset = await stream.get_offset()
+    try:
+        info: SessionInfo = await handle.query(AnalyticsWorkflow.get_session)
+        keep_open = info.turn_in_progress
+    except Exception:
+        keep_open = False
 
     async def event_stream():
         async for item in stream.subscribe(
@@ -237,7 +252,14 @@ async def stream_events(session_id: str, from_index: int = 0):
         ):
             event = item.data
             yield f"data: {json.dumps(event)}\n\n"
-            if event.get("type") == "AGENT_COMPLETE":
+            caught_up = item.offset >= end_offset - 1
+            if not keep_open and caught_up:
+                return
+            if (
+                keep_open
+                and item.offset >= end_offset
+                and event.get("type") == "AGENT_COMPLETE"
+            ):
                 return
 
     return StreamingResponse(

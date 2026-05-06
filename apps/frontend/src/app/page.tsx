@@ -183,24 +183,32 @@ export default function Home() {
   // Re-opens if a prior stream was aborted before any content arrived
   // (e.g. StrictMode dev double-mount); skips if already streaming or
   // already populated.
+  //
+  // We can't gate the fetch on a flag set inside a setRuntimes updater —
+  // React 18 batches functional updaters and runs them at render time, so
+  // the flag is unreliable when read synchronously. Instead, claim the slot
+  // synchronously against runtimesRef (so a same-tick caller sees us) and
+  // queue a functional setRuntimes that composes with any concurrent
+  // updates to the runtimes map (e.g. SSE dispatches landing in the same
+  // batch).
   function ensureSessionStream(sessionId: string) {
     const existing = runtimesRef.current.get(sessionId);
-    if (existing) {
-      if (existing.controller) return; // stream already in flight
-      const hasContent =
-        existing.chatState.messages.length > 0 ||
-        existing.chatState.currentTurn.steps.length > 0;
-      if (hasContent) return; // already populated; no need to re-stream
+    if (existing?.controller) return; // stream already in flight
+    if (
+      existing &&
+      (existing.chatState.messages.length > 0 ||
+        existing.chatState.currentTurn.steps.length > 0)
+    ) {
+      return; // already populated; no need to re-stream
     }
 
     const controller = new AbortController();
-    let opened = false;
-    setRuntimes(prev => {
+    const claim = (prev: Map<string, SessionRuntime>) => {
+      const cur = prev.get(sessionId);
+      // If a different controller has already been installed (e.g. sendMessage's
+      // queued updater landed in this batch), leave it alone.
+      if (cur?.controller && cur.controller !== controller) return prev;
       const next = new Map(prev);
-      const cur = next.get(sessionId);
-      // Race-safe: if another caller already opened a stream, leave it.
-      if (cur?.controller) return prev;
-      opened = true;
       while (next.size >= MAX_CACHED_SESSIONS && !next.has(sessionId)) {
         const oldest = next.keys().next().value;
         if (oldest === undefined) break;
@@ -211,11 +219,9 @@ export default function Home() {
       next.delete(sessionId);
       next.set(sessionId, { ...seed, controller });
       return next;
-    });
-    if (!opened) {
-      controller.abort();
-      return;
-    }
+    };
+    runtimesRef.current = claim(runtimesRef.current); // sync claim
+    setRuntimes(prev => claim(prev)); // composes with other queued updaters
 
     fetch(`/api/sessions/${sessionId}/stream?from_index=0`, {
       signal: controller.signal,
