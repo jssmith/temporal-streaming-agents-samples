@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from analytics_shared.events import make_event
+
 
 @dataclass
 class SSEEvent:
@@ -12,11 +14,7 @@ class SSEEvent:
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_sse(self) -> str:
-        payload = {
-            "type": self.type,
-            "timestamp": self.timestamp,
-            "data": self.data,
-        }
+        payload = make_event(self.type, self.timestamp, **self.data)
         return f"data: {json.dumps(payload)}\n\n"
 
     @staticmethod
@@ -28,25 +26,16 @@ class SSEEvent:
         return SSEEvent(type="AGENT_START", data={"agent_name": agent_name})
 
     @staticmethod
-    def thinking_start(call_id: str | None = None) -> "SSEEvent":
-        data = {}
-        if call_id:
-            data["call_id"] = call_id
-        return SSEEvent(type="THINKING_START", data=data)
+    def thinking_start() -> "SSEEvent":
+        return SSEEvent(type="THINKING_START", data={})
 
     @staticmethod
-    def thinking_delta(delta: str, call_id: str | None = None) -> "SSEEvent":
-        data: dict = {"delta": delta}
-        if call_id:
-            data["call_id"] = call_id
-        return SSEEvent(type="THINKING_DELTA", data=data)
+    def thinking_delta(delta: str) -> "SSEEvent":
+        return SSEEvent(type="THINKING_DELTA", data={"delta": delta})
 
     @staticmethod
-    def thinking_complete(content: str, call_id: str | None = None) -> "SSEEvent":
-        data: dict = {"content": content}
-        if call_id:
-            data["call_id"] = call_id
-        return SSEEvent(type="THINKING_COMPLETE", data=data)
+    def thinking_complete(content: str) -> "SSEEvent":
+        return SSEEvent(type="THINKING_COMPLETE", data={"content": content})
 
     @staticmethod
     def tool_call_start(call_id: str, tool_name: str, arguments: dict) -> "SSEEvent":

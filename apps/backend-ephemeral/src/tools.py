@@ -7,8 +7,12 @@ import sys
 from pathlib import Path
 
 from analytics_shared.database import get_db_path
-from analytics_shared.sql_tool import TOOL_DEFINITION as SQL_TOOL_DEFINITION
 from analytics_shared.sql_tool import execute_sql
+from analytics_shared.tools import TOOL_DEFINITIONS
+
+# Tool schemas (execute_sql, execute_python, bash) are defined once in
+# analytics_shared.tools and re-exported here for the agent loop and tests.
+__all__ = ["TOOL_DEFINITIONS", "execute_python", "execute_bash", "run_tool"]
 
 logger = logging.getLogger(__name__)
 
@@ -69,42 +73,6 @@ async def execute_bash(command: str, working_dir: Path) -> dict:
     except asyncio.TimeoutError:
         proc.kill()
         return {"error": f"Execution timed out after {TIMEOUT_SECONDS}s"}
-
-
-# Tool definitions for the Responses API
-TOOL_DEFINITIONS = [
-    SQL_TOOL_DEFINITION,
-    {
-        "type": "function",
-        "name": "execute_python",
-        "description": "Run Python code in a subprocess. pandas, matplotlib, sqlite3, json, math, statistics, collections, itertools are available. DB_PATH env var points to the SQLite file. Save matplotlib figures to files in the current directory. Print output to stdout.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "The Python code to execute",
-                }
-            },
-            "required": ["code"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "bash",
-        "description": "Run a shell command. DB_PATH env var is available. Working directory is the session directory.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute",
-                }
-            },
-            "required": ["command"],
-        },
-    },
-]
 
 
 async def run_tool(tool_name: str, arguments: dict, working_dir: Path) -> dict:

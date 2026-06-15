@@ -17,6 +17,7 @@ from temporalio.exceptions import ApplicationError
 
 from analytics_shared.constants import EVENTS_TOPIC
 from analytics_shared.database import get_db_path, load_schema as _load_schema
+from analytics_shared.events import make_event
 from analytics_shared.sql_tool import execute_sql as _execute_sql
 from analytics_shared.types import ToolCallInfo
 
@@ -31,6 +32,12 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 30
+
+# How often the activity heartbeats while a model call or tool runs. Cancellation
+# is delivered to an activity only on a heartbeat, so this interval sets the
+# floor on interrupt latency; it must stay well under HEARTBEAT_TIMEOUT (set on
+# the workflow side) so a quiet model doesn't trip the timeout.
+HEARTBEAT_INTERVAL_SECONDS = 1.0
 
 
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
@@ -137,18 +144,37 @@ async def _run_tool(tool_name: str, arguments: dict, working_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _make_event(event_type: str, **data) -> dict:
-    """Build an event dict. The pub/sub client handles JSON serialization
-    via the data converter at flush time."""
-    return {
-        "type": event_type,
-        "timestamp": _now_iso(),
-        "data": data,
-    }
+    """Build a streaming event stamped with wall-clock time.
+
+    Activities run non-deterministically, so they use the real clock (unlike
+    the workflow, which stamps events with workflow.now()). The stream client
+    handles JSON serialization via the data converter at flush time.
+    """
+    return make_event(event_type, datetime.now(timezone.utc).isoformat(), **data)
+
+
+@contextlib.asynccontextmanager
+async def _heartbeating(interval: float = HEARTBEAT_INTERVAL_SECONDS):
+    """Heartbeat on a timer for the duration of the block.
+
+    Cancellation is delivered to an activity on its heartbeat, and work inside
+    can go quiet (a reasoning model before its first token, a long subprocess),
+    so a steady timer keeps interrupts prompt and avoids tripping the heartbeat
+    timeout during a lull. The task is cancelled and awaited on exit.
+    """
+    async def _loop() -> None:
+        while True:
+            activity.heartbeat()
+            await asyncio.sleep(interval)
+
+    task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 # ---------------------------------------------------------------------------
@@ -208,19 +234,13 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
         token_usage: TokenUsage | None = None
         interrupted = False
 
-        # Heartbeat on a timer, not just per stream event. Cancellation is
-        # delivered to an activity on its heartbeat, and the model can go quiet
-        # for seconds (before the first token on a reasoning model, or mid
-        # reasoning) — without a steady heartbeat that gap would trip the 3s
-        # heartbeat timeout and delay (or drop) an interrupt.
-        async def _heartbeat_loop() -> None:
-            while True:
-                activity.heartbeat()
-                await asyncio.sleep(1.0)
-
-        heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
-            async with oai_client.responses.stream(**kwargs) as oai_stream:
+            # This Responses-API event dispatch mirrors the one in the ephemeral
+            # backend (backend-ephemeral/src/agent.py). They are deliberately not
+            # shared: this one publishes to a workflow stream and is
+            # interruptible; that one yields SSE inline and reclassifies pre-tool
+            # text as thinking. Keep them in sync by hand.
+            async with _heartbeating(), oai_client.responses.stream(**kwargs) as oai_stream:
                 async for event in oai_stream:
                     event_type = getattr(event, "type", None)
 
@@ -320,10 +340,6 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                 f"Connection error: {e}",
                 type="ConnectionError",
             ) from e
-        finally:
-            heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat_task
 
         # On the interrupt path we skip these extra publishes: the deltas have
         # already streamed, and we want minimal, non-blocking work before the
@@ -339,6 +355,17 @@ async def model_call(input: ModelCallInput) -> ModelCallResult:
                 events.publish(_make_event("TEXT_COMPLETE", text=text_buffer))
 
         # Context manager exit flushes remaining buffer
+
+    # A non-interrupted call must have seen response.completed and captured a
+    # response_id; the workflow chains the next turn off it via
+    # previous_response_id. An empty id here means the stream ended without that
+    # event, so fail rather than corrupt the chain with "". Retryable: a fresh
+    # attempt usually reaches completion.
+    if not interrupted and not response_id:
+        raise ApplicationError(
+            "Model stream ended without a response.completed event; no response_id captured",
+            type="MissingResponseId",
+        )
 
     # An interrupted call returns its partial text and no tool calls — the
     # workflow persists the partial and ends the turn rather than acting on
@@ -393,18 +420,8 @@ async def execute_tool(input: ToolInput) -> ToolResult:
     # (python/bash) the CancelledError kills the process group. execute_sql
     # runs in a worker thread that can't be interrupted, so its cancellation
     # only takes effect once the (short, read-only) query returns.
-    async def _heartbeat_loop() -> None:
-        while True:
-            activity.heartbeat()
-            await asyncio.sleep(1.0)
-
-    heartbeat_task = asyncio.create_task(_heartbeat_loop())
-    try:
+    async with _heartbeating():
         result = await _run_tool(input.tool_name, input.arguments, working_dir)
-    finally:
-        heartbeat_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat_task
 
     return ToolResult(
         call_id=input.call_id,

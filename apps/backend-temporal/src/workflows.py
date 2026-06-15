@@ -13,6 +13,8 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from analytics_shared.constants import EVENTS_TOPIC
+    from analytics_shared.events import make_event
+    from analytics_shared.tools import TOOL_DEFINITIONS
 
     from .types import (
         ModelCallInput,
@@ -25,6 +27,16 @@ with workflow.unsafe.imports_passed_through():
     )
 
 logger = workflow.logger
+
+# The model/tool activities heartbeat on a timer so an interrupt can be
+# delivered (cancellation reaches an activity only on a heartbeat). A 3s
+# heartbeat timeout encodes the cancellation latency we accept: the worker
+# throttles heartbeats to ~80% of the timeout, so the workflow's cancel lands
+# within roughly this window. The 180s/60s start-to-close timeouts bound a
+# single model call / tool run.
+HEARTBEAT_TIMEOUT = timedelta(seconds=3)
+MODEL_CALL_TIMEOUT = timedelta(seconds=180)
+TOOL_CALL_TIMEOUT = timedelta(seconds=60)
 
 SYSTEM_PROMPT_TEMPLATE = """You are an analytics assistant with access to a Chinook music store database (SQLite).
 
@@ -61,53 +73,9 @@ Database schema:
 {schema}"""
 
 
-TOOL_DEFINITIONS: list[dict] = [
-    {
-        "type": "function",
-        "name": "execute_sql",
-        "description": "Run a read-only SQL query against the Chinook SQLite database. Returns rows as a list of objects.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The SQL query to execute",
-                }
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "execute_python",
-        "description": "Run Python code in a subprocess. pandas, matplotlib, sqlite3, json, math, statistics, collections, itertools are available. DB_PATH env var points to the SQLite file. Save matplotlib figures to files in the current directory. Print output to stdout.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "The Python code to execute",
-                }
-            },
-            "required": ["code"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "bash",
-        "description": "Run a shell command. DB_PATH env var is available. Working directory is the session directory.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute",
-                }
-            },
-            "required": ["command"],
-        },
-    },
-]
+# Tool schemas (execute_sql, execute_python, bash) are defined once in
+# analytics_shared.tools and imported above. Pure data dicts pass through the
+# workflow sandbox fine.
 
 
 @workflow.defn
@@ -118,7 +86,7 @@ class AnalyticsWorkflow:
         self.stream = WorkflowStream(prior_state=state.stream_state)
         self.events = self.stream.topic(EVENTS_TOPIC, type=dict)
         self._messages: list[dict] = state.messages
-        self._pending_message: str | None = None
+        self._pending_messages: list[str] = []
         self._turn_complete: bool = True
         self._interrupted: bool = False
         self._closed: bool = False
@@ -131,11 +99,11 @@ class AnalyticsWorkflow:
     # -- helpers --
 
     def _emit(self, event_type: str, **data) -> None:
-        self.events.publish({
-            "type": event_type,
-            "timestamp": workflow.now().isoformat(),
-            "data": data,
-        })
+        # Stamp with workflow.now() so the timestamp is deterministic on replay
+        # (activities use wall-clock instead).
+        self.events.publish(
+            make_event(event_type, workflow.now().isoformat(), **data)
+        )
 
     def _build_system_prompt(self) -> str:
         session_id = workflow.info().workflow_id
@@ -161,7 +129,9 @@ class AnalyticsWorkflow:
 
     @workflow.signal
     def start_turn(self, input: StartTurnInput) -> None:
-        self._pending_message = input.message
+        # Queue rather than overwrite: a second start_turn arriving while a turn
+        # runs must not clobber the first. The run loop drains these in order.
+        self._pending_messages.append(input.message)
 
     @workflow.signal
     def interrupt(self) -> None:
@@ -196,12 +166,11 @@ class AnalyticsWorkflow:
 
         while True:
             await workflow.wait_condition(
-                lambda: self._pending_message is not None or self._closed
+                lambda: bool(self._pending_messages) or self._closed
             )
             if self._closed:
                 return
-            message: str = self._pending_message  # type: ignore[assignment]
-            self._pending_message = None
+            message = self._pending_messages.pop(0)
             self._turn_complete = False
             self._interrupted = False
 
@@ -221,6 +190,20 @@ class AnalyticsWorkflow:
                 )])
 
     async def _run_turn(self, message: str) -> None:
+        """Run one turn of the durable agent loop.
+
+        This is the canonical loop: append the user message, then repeatedly
+        call the model and execute any tool calls it requests until it returns
+        a final answer (or an interrupt ends the turn). The model call and each
+        tool run are activities; the workflow itself stays deterministic.
+
+        Context is carried server-side. With the Responses API store=True, each
+        response holds the prior turn's context, so once we have a response_id
+        we send only the new input (the user message on a fresh call, or the
+        tool outputs after a tool phase) and chain off previous_response_id. We
+        send the full system + history only when there is no response_id to
+        chain from (first turn, or after an interrupt reset the chain to None).
+        """
         self._messages.append({
             "role": "user",
             "content": message,
@@ -230,13 +213,18 @@ class AnalyticsWorkflow:
         self._emit("USER_MESSAGE", content=message)
         self._emit("AGENT_START", agent_name="analyst")
 
-        system_prompt = self._build_system_prompt()
-        input_messages: list[dict] = [
-            {"role": "system", "content": system_prompt},
-        ]
-        for msg in self._messages[:-1]:  # all previous messages
-            input_messages.append({"role": msg["role"], "content": msg["content"]})
-        input_messages.append({"role": "user", "content": message})
+        if self._response_id is not None:
+            # Chain off the stored response: send only the new user message.
+            first_call_messages: list[dict] = [{"role": "user", "content": message}]
+        else:
+            # No chain to resume: send system + full history + the new message.
+            system_prompt = self._build_system_prompt()
+            first_call_messages = [{"role": "system", "content": system_prompt}]
+            for msg in self._messages[:-1]:  # all previous messages
+                first_call_messages.append(
+                    {"role": msg["role"], "content": msg["content"]}
+                )
+            first_call_messages.append({"role": "user", "content": message})
 
         tool_outputs_for_next_call: list[dict] | None = None
         retry_policy = RetryPolicy(maximum_attempts=3)
@@ -244,35 +232,29 @@ class AnalyticsWorkflow:
         while not self._interrupted:
             operation_id = str(workflow.uuid4())
 
-            if tool_outputs_for_next_call is not None:
-                call_input = ModelCallInput(
-                    input_messages=tool_outputs_for_next_call,
-                    previous_response_id=self._response_id,
-                    tools=TOOL_DEFINITIONS,
-                    model=self._model,
-                    operation_id=operation_id,
-                    reasoning_effort=self._reasoning_effort,
-                )
-            else:
-                call_input = ModelCallInput(
-                    input_messages=input_messages,
-                    previous_response_id=self._response_id,
-                    tools=TOOL_DEFINITIONS,
-                    model=self._model,
-                    operation_id=operation_id,
-                    reasoning_effort=self._reasoning_effort,
-                )
+            # After a tool phase send only the tool outputs; otherwise send the
+            # first-call messages. Both chain off previous_response_id.
+            messages = (
+                tool_outputs_for_next_call
+                if tool_outputs_for_next_call is not None
+                else first_call_messages
+            )
+            call_input = ModelCallInput(
+                input_messages=messages,
+                previous_response_id=self._response_id,
+                tools=TOOL_DEFINITIONS,
+                model=self._model,
+                operation_id=operation_id,
+                reasoning_effort=self._reasoning_effort,
+            )
 
             model_task = asyncio.create_task(
                 workflow.execute_activity(
                     "model_call",
                     call_input,
-                    start_to_close_timeout=timedelta(seconds=180),
+                    start_to_close_timeout=MODEL_CALL_TIMEOUT,
                     retry_policy=retry_policy,
-                    # 3s makes cancellation prompt: an activity only receives a
-                    # cancel on its next heartbeat, and the worker throttles
-                    # heartbeats to ~80% of this timeout.
-                    heartbeat_timeout=timedelta(seconds=3),
+                    heartbeat_timeout=HEARTBEAT_TIMEOUT,
                     # Wait for the activity to wind down on cancel so we receive
                     # the partial result it returns (the model call catches the
                     # cancellation and returns whatever text streamed so far).
@@ -351,9 +333,9 @@ class AnalyticsWorkflow:
                             call_id=tc.call_id,
                             operation_id=str(workflow.uuid4()),
                         ),
-                        start_to_close_timeout=timedelta(seconds=60),
+                        start_to_close_timeout=TOOL_CALL_TIMEOUT,
                         retry_policy=retry_policy,
-                        heartbeat_timeout=timedelta(seconds=3),
+                        heartbeat_timeout=HEARTBEAT_TIMEOUT,
                         cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
                         result_type=ToolResult,
                     )

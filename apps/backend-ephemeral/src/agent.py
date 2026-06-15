@@ -107,14 +107,14 @@ async def run_agent_turn(
         thinking_buffer = ""
         thinking_active = False
 
+        # This Responses-API event dispatch mirrors the one in the temporal
+        # backend (backend-temporal/src/activities.py model_call). They are
+        # deliberately not shared: this one yields SSE inline and reclassifies
+        # pre-tool text as thinking; that one publishes to a workflow stream and
+        # is interruptible. Keep them in sync by hand.
         async with client.responses.stream(**kwargs) as stream:
             async for event in stream:
                 event_type = getattr(event, "type", None)
-
-                # Track sequence numbers for resume
-                seq = getattr(event, "sequence_number", None)
-                if seq is not None:
-                    session.sequence_number = seq
 
                 # Thinking/reasoning events (from reasoning models)
                 if event_type == "response.reasoning_summary_text.delta":

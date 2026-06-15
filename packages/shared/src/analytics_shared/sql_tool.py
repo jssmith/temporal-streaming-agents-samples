@@ -34,6 +34,10 @@ TOOL_DEFINITION: dict = {
 
 
 def _execute_sql_sync(query: str) -> dict:
+    # Read-only safety comes from the mode=ro connection opened in
+    # database.get_connection(readonly=True); the engine rejects writes there.
+    # The prefix check and LIMIT injection below are friendly-error and
+    # row-cap heuristics, not the security boundary.
     stripped = query.strip().upper()
     for prefix in FORBIDDEN_PREFIXES:
         if stripped.startswith(prefix):
