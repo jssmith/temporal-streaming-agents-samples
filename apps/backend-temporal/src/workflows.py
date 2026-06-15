@@ -143,6 +143,20 @@ class AnalyticsWorkflow:
             "SESSION_ID", session_id
         )
 
+    def _persist_partial(self, result: ModelCallResult | None) -> None:
+        """Persist the partial assistant text from an interrupted model call.
+
+        Marked interrupted so a reloaded client renders the same partial turn
+        it saw live instead of a user message with no reply.
+        """
+        if result is not None and result.final_text:
+            self._messages.append({
+                "role": "assistant",
+                "content": result.final_text,
+                "timestamp": workflow.now().isoformat(),
+                "interrupted": True,
+            })
+
     # -- signals --
 
     @workflow.signal
@@ -255,7 +269,14 @@ class AnalyticsWorkflow:
                     call_input,
                     start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=retry_policy,
-                    heartbeat_timeout=timedelta(seconds=30),
+                    # 3s makes cancellation prompt: an activity only receives a
+                    # cancel on its next heartbeat, and the worker throttles
+                    # heartbeats to ~80% of this timeout.
+                    heartbeat_timeout=timedelta(seconds=3),
+                    # Wait for the activity to wind down on cancel so we receive
+                    # the partial result it returns (the model call catches the
+                    # cancellation and returns whatever text streamed so far).
+                    cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
                     result_type=ModelCallResult,
                 )
             )
@@ -268,12 +289,19 @@ class AnalyticsWorkflow:
             if self._interrupted and not model_task.done():
                 model_task.cancel()
                 try:
-                    await model_task
+                    interrupted_result: ModelCallResult | None = await model_task
                 except (asyncio.CancelledError, ActivityError):
-                    pass
+                    interrupted_result = None
+                self._persist_partial(interrupted_result)
                 break
 
             model_result: ModelCallResult = model_task.result()
+
+            # An interrupt that landed just as the call finished: persist the
+            # text and end the turn without acting on any tool calls.
+            if self._interrupted or model_result.interrupted:
+                self._persist_partial(model_result)
+                break
 
             self._response_id = model_result.response_id
 
@@ -304,46 +332,91 @@ class AnalyticsWorkflow:
                     arguments=tc.arguments,
                 )
 
-            # Execute tools in parallel
+            # Execute tools in parallel, interruptibly. Each runs as a task so
+            # we can cancel it mid-execution. WAIT_CANCELLATION_COMPLETED makes
+            # the workflow wait for the activity to actually finish cancelling
+            # (kill its subprocess, report cancelled) before the turn ends. With
+            # TRY_CANCEL the workflow would resolve the activity and move on while
+            # it was still running; its next heartbeat would then fail (the
+            # server no longer knows it), the SDK would report a failure, and the
+            # retry policy would re-run the tool — an orphaned-execution storm.
             tool_tasks = [
-                workflow.execute_activity(
-                    "execute_tool",
-                    ToolInput(
-                        tool_name=tc.name,
-                        arguments=tc.arguments,
-                        working_dir=self._working_dir,
-                        call_id=tc.call_id,
-                        operation_id=str(workflow.uuid4()),
-                    ),
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=retry_policy,
-                    result_type=ToolResult,
+                asyncio.create_task(
+                    workflow.execute_activity(
+                        "execute_tool",
+                        ToolInput(
+                            tool_name=tc.name,
+                            arguments=tc.arguments,
+                            working_dir=self._working_dir,
+                            call_id=tc.call_id,
+                            operation_id=str(workflow.uuid4()),
+                        ),
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=retry_policy,
+                        heartbeat_timeout=timedelta(seconds=3),
+                        cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+                        result_type=ToolResult,
+                    )
                 )
                 for tc in model_result.tool_calls
             ]
 
+            # Drain results as each tool finishes (so the UI sees completions
+            # incrementally), but bail out the moment an interrupt arrives.
             tool_outputs_for_next_call = []
-            for coro in workflow.as_completed(tool_tasks):
-                result: ToolResult = await coro
-                error = result.result.get("error")
-                if error:
-                    self._emit(
-                        "TOOL_CALL_COMPLETE",
-                        call_id=result.call_id,
-                        tool_name=result.tool_name,
-                        error=error,
+            processed: set[int] = set()
+            while len(processed) < len(tool_tasks):
+                await workflow.wait_condition(
+                    lambda: self._interrupted
+                    or any(
+                        t.done() for i, t in enumerate(tool_tasks) if i not in processed
                     )
-                else:
-                    self._emit(
-                        "TOOL_CALL_COMPLETE",
-                        call_id=result.call_id,
-                        tool_name=result.tool_name,
-                        result=result.result,
-                    )
-                tool_outputs_for_next_call.append({
-                    "type": "function_call_output",
-                    "call_id": result.call_id,
-                    "output": json.dumps(result.result),
-                })
+                )
+                if self._interrupted:
+                    break
+                for i, t in enumerate(tool_tasks):
+                    if i in processed or not t.done():
+                        continue
+                    processed.add(i)
+                    result: ToolResult = t.result()
+                    error = result.result.get("error")
+                    if error:
+                        self._emit(
+                            "TOOL_CALL_COMPLETE",
+                            call_id=result.call_id,
+                            tool_name=result.tool_name,
+                            error=error,
+                        )
+                    else:
+                        self._emit(
+                            "TOOL_CALL_COMPLETE",
+                            call_id=result.call_id,
+                            tool_name=result.tool_name,
+                            result=result.result,
+                        )
+                    tool_outputs_for_next_call.append({
+                        "type": "function_call_output",
+                        "call_id": result.call_id,
+                        "output": json.dumps(result.result),
+                    })
 
-        self._emit("AGENT_COMPLETE")
+            if self._interrupted:
+                for t in tool_tasks:
+                    if not t.done():
+                        t.cancel()
+                # Let the cancellations resolve so no tasks dangle into the
+                # next turn; the activities kill their subprocesses on the way.
+                await asyncio.gather(*tool_tasks, return_exceptions=True)
+                # These tool calls were never answered with function_call_output
+                # (any that did finish are intentionally discarded along with
+                # tool_outputs_for_next_call). Drop the response chain so the
+                # next turn starts fresh from full history rather than chaining
+                # off a response with outstanding tool calls, which the
+                # Responses API rejects.
+                self._response_id = None
+                break
+
+        if self._interrupted:
+            self._emit("INTERRUPTED")
+        else:
+            self._emit("AGENT_COMPLETE")

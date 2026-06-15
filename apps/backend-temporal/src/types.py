@@ -71,6 +71,9 @@ class ModelCallResult(BaseModel):
     tool_calls: list[ToolCallInfo]
     final_text: str | None = None
     usage: TokenUsage | None = None
+    # Set when the model call was interrupted mid-stream. final_text then
+    # holds whatever text had streamed so far so the workflow can persist it.
+    interrupted: bool = False
 
 
 class ToolInput(BaseModel):

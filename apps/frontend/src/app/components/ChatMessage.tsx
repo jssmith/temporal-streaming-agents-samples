@@ -45,9 +45,10 @@ export function UserMessage({ content }: UserMessageProps) {
 
 interface AgentMessageProps {
   steps: Step[];
+  interrupted?: boolean;
 }
 
-export function AgentMessage({ steps }: AgentMessageProps) {
+export function AgentMessage({ steps, interrupted }: AgentMessageProps) {
   return (
     <div className="mb-4">
       <div className="space-y-1">
@@ -87,6 +88,9 @@ export function AgentMessage({ steps }: AgentMessageProps) {
           return null;
         })}
       </div>
+      {interrupted && (
+        <div className="mt-1.5 text-[11px] text-gray-500 italic">Interrupted</div>
+      )}
     </div>
   );
 }

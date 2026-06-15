@@ -12,6 +12,7 @@ export interface ChatMessage {
   role: "user" | "agent";
   content?: string;
   steps?: Step[];
+  interrupted?: boolean;
 }
 
 export interface TurnState {
@@ -27,6 +28,7 @@ export interface ChatState {
 export type ChatAction =
   | { type: "USER_MESSAGE"; content: string }
   | { type: "AGENT_COMPLETE" }
+  | { type: "INTERRUPTED" }
   | { type: "CLEAR" }
   | { type: "THINKING_START"; timestamp?: string }
   | { type: "THINKING_DELTA"; delta: string }
@@ -61,6 +63,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (state.currentTurn.steps.length === 0) return state;
       return {
         messages: [...state.messages, { role: "agent", steps: [...state.currentTurn.steps] }],
+        currentTurn: { steps: [], thinkingCounter: 0 },
+      };
+    }
+
+    case "INTERRUPTED": {
+      // Fold the partial turn into history, marked interrupted. If nothing
+      // streamed yet there's nothing to show.
+      if (state.currentTurn.steps.length === 0) return state;
+      return {
+        messages: [...state.messages, { role: "agent", steps: [...state.currentTurn.steps], interrupted: true }],
         currentTurn: { steps: [], thinkingCounter: 0 },
       };
     }

@@ -188,7 +188,7 @@ async def run_session(session_id: str, request: RunRequest):
         ):
             event = item.data
             yield f"data: {json.dumps(event)}\n\n"
-            if event.get("type") == "AGENT_COMPLETE":
+            if event.get("type") in ("AGENT_COMPLETE", "INTERRUPTED"):
                 return
 
     return StreamingResponse(
@@ -258,7 +258,7 @@ async def stream_events(session_id: str, from_index: int = 0):
             if (
                 keep_open
                 and item.offset >= end_offset
-                and event.get("type") == "AGENT_COMPLETE"
+                and event.get("type") in ("AGENT_COMPLETE", "INTERRUPTED")
             ):
                 return
 

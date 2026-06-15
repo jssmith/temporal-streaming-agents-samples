@@ -457,8 +457,19 @@ export default function Home() {
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Escape" && appState === "running" && activeSessionId) {
-      runtimesRef.current.get(activeSessionId)?.controller?.abort();
-      fetch(`/api/sessions/${activeSessionId}/interrupt`, { method: "POST" });
+      // Ask the workflow to interrupt, but keep the SSE stream open: the
+      // server emits an INTERRUPTED event (with the partial turn) that drives
+      // the UI to idle. Self-aborting here would hide whether the backend
+      // actually stopped. If the interrupt request itself fails, fall back to
+      // aborting locally so the UI can't get stuck in "running".
+      const sid = activeSessionId;
+      fetch(`/api/sessions/${sid}/interrupt`, { method: "POST" })
+        .then(res => {
+          if (!res.ok) throw new Error(`interrupt failed: ${res.status}`);
+        })
+        .catch(() => {
+          runtimesRef.current.get(sid)?.controller?.abort();
+        });
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -524,7 +535,7 @@ export default function Home() {
               if (msg.role === "user") {
                 return <UserMessage key={i} content={msg.content!} />;
               }
-              return <AgentMessage key={i} steps={msg.steps!} />;
+              return <AgentMessage key={i} steps={msg.steps!} interrupted={msg.interrupted} />;
             })}
 
             {/* Live agent turn */}

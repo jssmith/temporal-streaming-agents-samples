@@ -23,6 +23,10 @@ export function processEvent(
       dispatch({ type: "AGENT_COMPLETE" });
       setAppState("idle");
       break;
+    case "INTERRUPTED":
+      dispatch({ type: "INTERRUPTED" });
+      setAppState("idle");
+      break;
     case "THINKING_START":
       dispatch({ type: "THINKING_START", timestamp: event.timestamp });
       break;
