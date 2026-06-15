@@ -30,7 +30,6 @@ export type Step =
 
 interface UserMessageProps {
   content: string;
-  onEdit?: (newContent: string) => void;
 }
 
 export function UserMessage({ content }: UserMessageProps) {
@@ -68,7 +67,6 @@ export function AgentMessage({ steps, interrupted }: AgentMessageProps) {
             return (
               <CodeExecution
                 key={`tool-${step.data.callId}`}
-                callId={step.data.callId}
                 toolName={step.data.toolName}
                 arguments={step.data.arguments}
                 status={step.data.status}

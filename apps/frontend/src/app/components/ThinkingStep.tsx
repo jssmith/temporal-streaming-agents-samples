@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
+import { useElapsedSeconds } from "./useElapsedSeconds";
 
 interface ThinkingStepProps {
   status: "active" | "done";
@@ -12,7 +13,6 @@ interface ThinkingStepProps {
 export default function ThinkingStep({ status, content, duration, isLast }: ThinkingStepProps) {
   const [manualToggle, setManualToggle] = useState<boolean | null>(null);
   const expanded = manualToggle ?? (isLast === true);
-  const [elapsed, setElapsed] = useState(0);
 
   // Reset manual override when this step is no longer the last item
   useEffect(() => {
@@ -20,25 +20,10 @@ export default function ThinkingStep({ status, content, duration, isLast }: Thin
       setManualToggle(null);
     }
   }, [isLast]);
-  const startTime = useRef(Date.now());
 
-  useEffect(() => {
-    if (status !== "active") return;
-    const interval = setInterval(() => {
-      setElapsed((Date.now() - startTime.current) / 1000);
-    }, 100);
-    return () => clearInterval(interval);
-  }, [status]);
-
-  useEffect(() => {
-    if (status === "done") {
-      setElapsed((Date.now() - startTime.current) / 1000);
-    }
-  }, [status]);
-
-  // Use pre-computed duration from event timestamps if available,
-  // otherwise fall back to wall-clock elapsed time
-  const displayDuration = duration ?? elapsed;
+  // Pre-computed duration from event timestamps wins (replay); otherwise
+  // fall back to wall-clock elapsed time while active.
+  const displayDuration = useElapsedSeconds(status === "active", duration);
 
   const label =
     status === "active"
@@ -49,6 +34,7 @@ export default function ThinkingStep({ status, content, duration, isLast }: Thin
     <div className="mb-1">
       <button
         onClick={() => setManualToggle(!expanded)}
+        aria-expanded={expanded}
         className="flex items-center gap-1.5 text-[13px] font-medium text-gray-400 hover:text-gray-300 transition-colors"
       >
         <span className="text-xs">{expanded ? "▾" : "▸"}</span>

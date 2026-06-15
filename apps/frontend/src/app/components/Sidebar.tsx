@@ -60,6 +60,7 @@ export default function Sidebar({
                 }}
                 className="shrink-0 px-2 py-2 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
                 title="Delete session"
+                aria-label="Delete session"
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M18 6L6 18M6 6l12 12" />

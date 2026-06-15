@@ -8,12 +8,13 @@ export interface SSEEvent {
   data: Record<string, unknown>;
 }
 
-export interface ChatMessage {
-  role: "user" | "agent";
-  content?: string;
-  steps?: Step[];
-  interrupted?: boolean;
-}
+// Discriminated on `role`: a user message carries plain text; an agent
+// message carries the rendered turn steps and an optional interrupted flag.
+// Keeping these as separate variants lets the renderer drop non-null
+// assertions when reading `content`/`steps`.
+export type ChatMessage =
+  | { role: "user"; content: string }
+  | { role: "agent"; steps: Step[]; interrupted?: boolean };
 
 export interface TurnState {
   steps: Step[];
