@@ -442,11 +442,44 @@ export default function Home() {
     }
   }, [appState, queuedMessage, sendMessage]);
 
+  // Interrupt the active turn with immediate UI acknowledgement. Reads live
+  // state from refs (not closure) so it's safe to call from a long-lived
+  // window listener. The setters operate via setRuntimes, so a stable []
+  // dependency list is correct.
+  const interruptActive = useCallback(() => {
+    const sid = activeSessionIdRef.current;
+    if (!sid) return;
+    const runtime = runtimesRef.current.get(sid);
+    if (!runtime || runtime.appState !== "running") return; // nothing to stop
+    setAppStateFor(sid, "interrupting");
+    fetch(`/api/sessions/${sid}/interrupt`, { method: "POST" })
+      .then(res => {
+        if (!res.ok) throw new Error(`interrupt failed: ${res.status}`);
+      })
+      .catch(() => {
+        runtimesRef.current.get(sid)?.controller?.abort();
+      });
+  }, []);
+
+  // Esc interrupts the running turn regardless of focus. Binding to the
+  // textarea alone misses the common case where the user has clicked a step,
+  // scrolled the transcript, or touched the sidebar while the turn streams.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") interruptActive();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [interruptActive]);
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!input.trim()) return;
 
-    if (appState === "running" || appState === "interrupting") {
+    // Queue while a turn is in flight (including the brief "sending" window
+    // before the first event) so Enter can't fire a second /run for the same
+    // session. The queued message is sent once the active turn goes idle.
+    if (appState === "sending" || appState === "running" || appState === "interrupting") {
       setQueuedMessage(input);
       setInput("");
       return;
@@ -456,25 +489,8 @@ export default function Home() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Escape" && appState === "running" && activeSessionId) {
-      // Acknowledge the interrupt immediately. Cancellation is heartbeat-
-      // delivered and takes a couple seconds to actually land, so flip to an
-      // "interrupting" state now and let the server's INTERRUPTED event move us
-      // to idle. The guard stays on "running", so repeated Esc while stopping
-      // is a no-op. We keep the SSE open (the partial turn keeps rendering);
-      // self-aborting would hide whether the backend stopped. If the interrupt
-      // request fails, fall back to a local abort so the UI can't get stuck.
-      const sid = activeSessionId;
-      setAppStateFor(sid, "interrupting");
-      fetch(`/api/sessions/${sid}/interrupt`, { method: "POST" })
-        .then(res => {
-          if (!res.ok) throw new Error(`interrupt failed: ${res.status}`);
-        })
-        .catch(() => {
-          runtimesRef.current.get(sid)?.controller?.abort();
-        });
-      return;
-    }
+    // Esc is handled by a window-level listener (see interruptActive) so it
+    // works regardless of focus. Here we only handle Enter-to-send.
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit(e);
