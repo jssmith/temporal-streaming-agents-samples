@@ -446,7 +446,7 @@ export default function Home() {
     e.preventDefault();
     if (!input.trim()) return;
 
-    if (appState === "running") {
+    if (appState === "running" || appState === "interrupting") {
       setQueuedMessage(input);
       setInput("");
       return;
@@ -457,12 +457,15 @@ export default function Home() {
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Escape" && appState === "running" && activeSessionId) {
-      // Ask the workflow to interrupt, but keep the SSE stream open: the
-      // server emits an INTERRUPTED event (with the partial turn) that drives
-      // the UI to idle. Self-aborting here would hide whether the backend
-      // actually stopped. If the interrupt request itself fails, fall back to
-      // aborting locally so the UI can't get stuck in "running".
+      // Acknowledge the interrupt immediately. Cancellation is heartbeat-
+      // delivered and takes a couple seconds to actually land, so flip to an
+      // "interrupting" state now and let the server's INTERRUPTED event move us
+      // to idle. The guard stays on "running", so repeated Esc while stopping
+      // is a no-op. We keep the SSE open (the partial turn keeps rendering);
+      // self-aborting would hide whether the backend stopped. If the interrupt
+      // request fails, fall back to a local abort so the UI can't get stuck.
       const sid = activeSessionId;
+      setAppStateFor(sid, "interrupting");
       fetch(`/api/sessions/${sid}/interrupt`, { method: "POST" })
         .then(res => {
           if (!res.ok) throw new Error(`interrupt failed: ${res.status}`);
@@ -556,7 +559,7 @@ export default function Home() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                appState === "running"
+                appState === "running" || appState === "interrupting"
                   ? "Type to steer the agent or queue a follow-up"
                   : "Ask anything..."
               }
@@ -576,6 +579,11 @@ export default function Home() {
           {appState === "running" && (
             <p className="text-[11px] text-gray-500 mt-1.5 text-center">
               Esc to interrupt
+            </p>
+          )}
+          {appState === "interrupting" && (
+            <p className="text-[11px] text-gray-500 mt-1.5 text-center animate-pulse">
+              Stopping…
             </p>
           )}
         </div>
