@@ -1,95 +1,93 @@
-# Temporal Streaming Agents Samples
+# Temporal Streaming Agents
 
-Full-stack AI agent demos built on
-[`temporalio.contrib.workflow_streams`](https://docs.temporal.io/develop/python/libraries/workflow-streams)
-(ships in `temporalio>=1.27.0`, public preview). Two end-to-end apps —
-one web, one terminal — plus a non-Temporal comparison backend.
+Full-stack AI agent demos built on [Workflow Streams](https://docs.temporal.io/develop/python/libraries/workflow-streams),
+Temporal's durable streaming abstraction (public preview, ships in `temporalio>=1.27.0`).
+An analytics chat agent on the web and a voice agent in the terminal, both
+streaming live tokens, reasoning, tool calls, and charts straight off a durable
+Workflow.
 
-This repo sits between two related resources:
+![Analytics agent: streaming response with SQL and Python tool calls and a generated chart](docs/images/analytics-agent.png)
 
-- **API reference + semantics**: the [Workflow Streams docs page](https://docs.temporal.io/develop/python/libraries/workflow-streams).
-- **Minimal feature-focused scenarios**: [samples-python/workflow_streams](https://github.com/temporalio/samples-python/tree/main/workflow_streams) (basic publish/subscribe, reconnecting subscriber, external publisher, bounded log via truncate, LLM with retry).
-- **This repo**: those primitives put together at production shape — a full backend-for-frontend (BFF, the HTTP service the browser talks to) plus frontend and worker, multi-turn conversations, durability tested in anger, real audio over Temporal.
+## Quickstart
+
+You need Python 3.12+, Node.js 18+, [`uv`](https://docs.astral.sh/uv/), the
+[Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal` on macOS),
+and an OpenAI API key.
+
+```bash
+git clone https://github.com/jssmith/temporal-streaming-agents-samples
+cd temporal-streaming-agents-samples
+export OPENAI_API_KEY=sk-...
+scripts/run-demo.sh analytics
+```
+
+Then open <http://localhost:3001>.
+
+`run-demo.sh` does the rest: it downloads the sample database, runs `uv sync`,
+installs frontend dependencies, starts a local `temporal server start-dev` if
+one isn't already running, and brings up the worker, BFF, and frontend. Ctrl+C
+tears down only what it started.
+
+For the voice agent:
+
+```bash
+scripts/run-demo.sh voice
+```
+
+The script prints the client command to run in a second terminal.
 
 ## Demos
 
 ### `apps/backend-temporal` — Analytics chat agent (web)
 
-A chat UI over the Chinook music store database. The agent has SQL,
-Python, and bash tools and writes results back as a streaming response
-with markdown tables and embedded charts. Sessions are durable workflows;
-the FastAPI BFF is a stateless SSE proxy that subscribes to the workflow
-stream and resumes from the client's last-seen offset on reconnect. The
-React frontend keeps a per-session runtime with background SSE streams,
-so a turn fired on tab A keeps producing tokens into A's cached state
-while you read tab B.
+A chat UI over the Chinook music store database. The agent has SQL, Python, and
+bash tools and writes results back as a streaming response with markdown tables
+and embedded charts. Each session is a durable Workflow; the FastAPI
+backend-for-frontend is a stateless SSE proxy that subscribes to the Workflow
+stream and resumes from the client's last-seen offset on reconnect.
 
 See [`apps/backend-temporal/ARCHITECTURE.md`](apps/backend-temporal/ARCHITECTURE.md).
 
 ### `apps/voice-terminal` — Voice agent (terminal)
 
-Spoken queries against the same database. Half-duplex: speak, then listen.
-Each turn is a Temporal workflow; transcribe, model_call, and execute_sql
-are activities. TTS audio is streamed sentence-by-sentence over the
-workflow stream. Continue-as-new paired with client-driven per-turn
+Spoken queries against the same database. Each turn is a Workflow; transcribe,
+model call, and SQL execution are Activities. TTS audio streams back
+sentence-by-sentence over the Workflow stream. Continue-as-new with per-turn
 truncation keeps the durable history bounded across long conversations.
-The agent has an `end_session` tool it calls when the user says goodbye.
 
 See [`apps/voice-terminal/ARCHITECTURE.md`](apps/voice-terminal/ARCHITECTURE.md).
 
 ### `apps/backend-ephemeral` — Same agent, no Temporal
 
-A drop-in non-Temporal backend for the analytics frontend. Same agent
-loop, in-memory sessions, no durability. Useful for seeing what running
-on Temporal actually buys you.
+A drop-in non-Temporal backend for the analytics frontend. Same agent loop,
+in-memory sessions, no durability. Useful for seeing what running on Temporal
+buys you.
 
-## Running
+## Running against Temporal Cloud
 
-The fast path:
+Drop `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, and `TEMPORAL_API_KEY` into
+`apps/backend-temporal/.env`. `run-demo.sh` honors it and prints which cluster
+it connected to; otherwise everything points at `localhost:7233`.
+
+## Running by hand
 
 ```bash
+temporal server start-dev                                          # terminal 1
+
+cd apps/backend-temporal                                           # terminal 2
 export OPENAI_API_KEY=sk-...
-scripts/run-demo.sh analytics    # backend-temporal worker + BFF + frontend
-scripts/run-demo.sh voice        # voice-terminal worker; client in another terminal
+uv run python -m src.worker
+
+cd apps/backend-temporal                                           # terminal 3
+uv run uvicorn src.main:app --reload --port 8001
+
+cd apps/frontend && npm run dev                                    # terminal 4
 ```
 
-The script is idempotent against a `temporal server start-dev` you've
-already started, prints which cluster won (local or Temporal Cloud per
-`apps/backend-temporal/.env`), and tears down only what it spawned on
-Ctrl+C.
+For the ephemeral comparison, replace terminals 2 and 3 with a single
+`(cd apps/backend-ephemeral && uv run uvicorn src.main:app --reload --port 8001)`.
 
-For the analytics demo, browse to <http://localhost:3001>. For the voice
-demo, the script prints the client command to run in a second terminal.
-
-## What these demos exercise that the focused scenarios don't
-
-- **Continue-as-new in a hot loop with active subscribers**, on both
-  apps.
-- **Truncation paired with CAN** to bound durable history for
-  long-running voice conversations (per-turn ack from the client; CAN
-  waits for `_log` to drain before snapshotting).
-- **Stateless BFF resumption** from offset on reconnect.
-- **Per-tab frontend cache** (LRU 5) with persistent background streams,
-  so switching tabs is a synchronous restore.
-- **Real audio over Temporal**: payload sizing, `max_output_tokens` as a
-  per-turn budget, drain-before-close on agent-initiated shutdown.
-
-## Setup
-
-Prerequisites: Python 3.12+, Node.js 18+, [`uv`](https://docs.astral.sh/uv/),
-[Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal` on
-macOS), and an OpenAI API key with Write access to `/v1/responses`.
-
-```bash
-./setup.sh                      # downloads the Chinook SQLite database
-uv sync                         # installs all apps + packages/shared
-(cd apps/frontend && npm install)
-```
-
-To run against Temporal Cloud, drop `TEMPORAL_ADDRESS`,
-`TEMPORAL_NAMESPACE`, and `TEMPORAL_API_KEY` into
-`apps/backend-temporal/.env`. The run-demo script and `temporal_client.py`
-both honor it; otherwise everything points at `localhost:7233`.
+First time only: `./setup.sh && uv sync --all-packages && (cd apps/frontend && npm install)`.
 
 ## Layout
 
@@ -103,31 +101,6 @@ packages/shared/         Chinook DB access, SQL tool, common types
 scripts/                 run-demo.sh and friends
 ```
 
-## Running by hand
-
-If you'd rather run pieces individually:
-
-```bash
-# Terminal 1
-temporal server start-dev
-
-# Terminal 2 — worker
-cd apps/backend-temporal
-export OPENAI_API_KEY=sk-...
-uv run python -m src.worker
-
-# Terminal 3 — BFF
-cd apps/backend-temporal
-uv run uvicorn src.main:app --reload --port 8001
-
-# Terminal 4 — frontend
-cd apps/frontend
-npm run dev
-```
-
-For the ephemeral comparison, replace terminals 2 and 3 with a single
-`(cd apps/backend-ephemeral && uv run uvicorn src.main:app --reload --port 8001)`.
-
 ## Tests
 
 ```bash
@@ -137,6 +110,10 @@ For the ephemeral comparison, replace terminals 2 and 3 with a single
 (cd apps/frontend           && npx vitest run)
 ```
 
-End-to-end Playwright suites under `tests/e2e/` and
-`playwright.temporal.config.ts` need a running Temporal cluster and an
-`OPENAI_API_KEY`.
+End-to-end Playwright suites under `tests/e2e/` and `playwright.temporal.config.ts`
+need a running Temporal cluster and an `OPENAI_API_KEY`.
+
+## See also
+
+- [Workflow Streams documentation](https://docs.temporal.io/develop/python/libraries/workflow-streams) — API and semantics.
+- [samples-python/workflow_streams](https://github.com/temporalio/samples-python/tree/main/workflow_streams) — minimal, feature-focused scenarios.
