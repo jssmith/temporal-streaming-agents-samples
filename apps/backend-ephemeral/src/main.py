@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections import defaultdict
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +19,15 @@ from .sessions import create_session, delete_session as remove_session, get_sess
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Analytics Agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_schema()
+    logger.info("Analytics agent backend started")
+    yield
+
+
+app = FastAPI(title="Analytics Agent", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,12 +52,6 @@ def _notify(session_id: str) -> None:
     sig = _stream_signals.get(session_id)
     if sig:
         sig.set()
-
-
-@app.on_event("startup")
-async def startup():
-    load_schema()
-    logger.info("Analytics agent backend started")
 
 
 @app.get("/api/health")

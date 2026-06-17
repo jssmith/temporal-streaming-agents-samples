@@ -41,23 +41,15 @@ class TestFactoryMethods:
         event = SSEEvent.agent_start("coder")
         assert event.data == {"agent_name": "coder"}
 
-    def test_thinking_start_no_call_id(self):
+    def test_thinking_start(self):
         event = SSEEvent.thinking_start()
         assert event.type == "THINKING_START"
         assert event.data == {}
-
-    def test_thinking_start_with_call_id(self):
-        event = SSEEvent.thinking_start(call_id="abc")
-        assert event.data == {"call_id": "abc"}
 
     def test_thinking_delta(self):
         event = SSEEvent.thinking_delta("chunk")
         assert event.type == "THINKING_DELTA"
         assert event.data["delta"] == "chunk"
-
-    def test_thinking_delta_with_call_id(self):
-        event = SSEEvent.thinking_delta("chunk", call_id="abc")
-        assert event.data == {"delta": "chunk", "call_id": "abc"}
 
     def test_thinking_complete(self):
         event = SSEEvent.thinking_complete("full thought")

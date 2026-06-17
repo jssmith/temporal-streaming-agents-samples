@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.workflow_streams import WorkflowStreamClient
+from temporalio.service import RPCError, RPCStatusCode
 
 from analytics_shared.constants import EVENTS_TOPIC
 from .types import (
@@ -28,6 +29,15 @@ logger = logging.getLogger(__name__)
 
 TASK_QUEUE = "analytics-agent"
 SESSIONS_DIR = Path(__file__).parent.parent.parent / "sessions"
+
+
+def _is_workflow_not_found(exc: RPCError) -> bool:
+    """True when an RPC failed because the workflow/session does not exist.
+
+    Only this maps to a 404; any other RPC failure is a real error we must not
+    disguise as "not found".
+    """
+    return exc.status == RPCStatusCode.NOT_FOUND
 
 _client: Client | None = None
 
@@ -151,8 +161,11 @@ async def get_session(session_id: str):
     handle = client.get_workflow_handle(session_id)
     try:
         info: SessionInfo = await handle.query(AnalyticsWorkflow.get_session)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Session not found")
+    except RPCError as e:
+        if _is_workflow_not_found(e):
+            raise HTTPException(status_code=404, detail="Session not found")
+        logger.exception("Failed to query workflow %s", session_id)
+        raise
     return SessionMessages(
         messages=info.messages,
         turn_in_progress=info.turn_in_progress,
@@ -167,8 +180,11 @@ async def run_session(session_id: str, request: RunRequest):
     # Verify workflow is running
     try:
         desc = await handle.describe()
-    except Exception:
-        raise HTTPException(status_code=404, detail="Session not found")
+    except RPCError as e:
+        if _is_workflow_not_found(e):
+            raise HTTPException(status_code=404, detail="Session not found")
+        logger.exception("Failed to describe workflow %s", session_id)
+        raise
     if desc.status != WorkflowExecutionStatus.RUNNING:
         raise HTTPException(status_code=404, detail="Session not running")
 
@@ -188,7 +204,7 @@ async def run_session(session_id: str, request: RunRequest):
         ):
             event = item.data
             yield f"data: {json.dumps(event)}\n\n"
-            if event.get("type") == "AGENT_COMPLETE":
+            if event.get("type") in ("AGENT_COMPLETE", "INTERRUPTED"):
                 return
 
     return StreamingResponse(
@@ -209,8 +225,11 @@ async def delete_session(session_id: str):
     handle = client.get_workflow_handle(session_id)
     try:
         await handle.signal(AnalyticsWorkflow.close_session)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Session not found")
+    except RPCError as e:
+        if _is_workflow_not_found(e):
+            raise HTTPException(status_code=404, detail="Session not found")
+        logger.exception("Failed to signal workflow %s (close_session)", session_id)
+        raise
     return {"status": "deleted"}
 
 
@@ -220,8 +239,11 @@ async def interrupt_session(session_id: str):
     handle = client.get_workflow_handle(session_id)
     try:
         await handle.signal(AnalyticsWorkflow.interrupt)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Session not found")
+    except RPCError as e:
+        if _is_workflow_not_found(e):
+            raise HTTPException(status_code=404, detail="Session not found")
+        logger.exception("Failed to signal workflow %s (interrupt)", session_id)
+        raise
     return {"status": "interrupted"}
 
 
@@ -258,7 +280,7 @@ async def stream_events(session_id: str, from_index: int = 0):
             if (
                 keep_open
                 and item.offset >= end_offset
-                and event.get("type") == "AGENT_COMPLETE"
+                and event.get("type") in ("AGENT_COMPLETE", "INTERRUPTED")
             ):
                 return
 

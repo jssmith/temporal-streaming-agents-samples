@@ -51,6 +51,29 @@ describe("chatReducer", () => {
     expect(state).toBe(initialChatState);
   });
 
+  it("INTERRUPTED snapshots the partial turn and marks it interrupted", () => {
+    const state: ChatState = {
+      messages: [{ role: "user", content: "hi" }],
+      currentTurn: {
+        steps: [{ type: "output", text: "partial ans" }],
+        thinkingCounter: 1,
+      },
+    };
+    const next = chatReducer(state, { type: "INTERRUPTED" });
+    expect(next.messages).toHaveLength(2);
+    expect(next.messages[1]).toEqual({
+      role: "agent",
+      steps: [{ type: "output", text: "partial ans" }],
+      interrupted: true,
+    });
+    expect(next.currentTurn).toEqual({ steps: [], thinkingCounter: 0 });
+  });
+
+  it("INTERRUPTED with empty turn is a no-op", () => {
+    const state = chatReducer(initialChatState, { type: "INTERRUPTED" });
+    expect(state).toBe(initialChatState);
+  });
+
   it("CLEAR resets everything", () => {
     const state: ChatState = {
       messages: [{ role: "user", content: "hi" }],

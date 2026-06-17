@@ -30,7 +30,6 @@ export type Step =
 
 interface UserMessageProps {
   content: string;
-  onEdit?: (newContent: string) => void;
 }
 
 export function UserMessage({ content }: UserMessageProps) {
@@ -45,9 +44,10 @@ export function UserMessage({ content }: UserMessageProps) {
 
 interface AgentMessageProps {
   steps: Step[];
+  interrupted?: boolean;
 }
 
-export function AgentMessage({ steps }: AgentMessageProps) {
+export function AgentMessage({ steps, interrupted }: AgentMessageProps) {
   return (
     <div className="mb-4">
       <div className="space-y-1">
@@ -67,7 +67,6 @@ export function AgentMessage({ steps }: AgentMessageProps) {
             return (
               <CodeExecution
                 key={`tool-${step.data.callId}`}
-                callId={step.data.callId}
                 toolName={step.data.toolName}
                 arguments={step.data.arguments}
                 status={step.data.status}
@@ -87,6 +86,9 @@ export function AgentMessage({ steps }: AgentMessageProps) {
           return null;
         })}
       </div>
+      {interrupted && (
+        <div className="mt-1.5 text-[11px] text-gray-500 italic">Interrupted</div>
+      )}
     </div>
   );
 }

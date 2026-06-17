@@ -12,7 +12,6 @@ class Session:
     session_id: str
     messages: list[dict] = field(default_factory=list)
     response_id: str | None = None
-    sequence_number: int | None = None
     working_dir: Path = field(default_factory=Path)
 
 

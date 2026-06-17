@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { codeHighlighterStyle, codeHighlighterCustomStyle } from "./codeStyle";
+import { useElapsedSeconds } from "./useElapsedSeconds";
 
 interface CodeExecutionProps {
-  callId: string;
   toolName: string;
   arguments: Record<string, unknown>;
   status: "running" | "done" | "error";
@@ -14,22 +14,23 @@ interface CodeExecutionProps {
   duration?: number; // Pre-computed from event timestamps (for replay)
 }
 
-function getLanguage(toolName: string): string {
-  if (toolName === "execute_sql") return "sql";
-  if (toolName === "execute_python") return "python";
-  return "bash";
-}
+// Per-tool presentation: syntax-highlight language, human label, and which
+// argument holds the code to show. Tools not listed fall back to DEFAULT.
+type ToolMeta = {
+  language: string;
+  label: string;
+  codeArg: string;
+};
 
-function getLabel(toolName: string): string {
-  if (toolName === "execute_sql") return "SQL";
-  if (toolName === "execute_python") return "Python";
-  return "bash";
-}
+const DEFAULT_TOOL_META: ToolMeta = { language: "bash", label: "bash", codeArg: "command" };
 
-function getCode(toolName: string, args: Record<string, unknown>): string {
-  if (toolName === "execute_sql") return (args.query as string) || "";
-  if (toolName === "execute_python") return (args.code as string) || "";
-  return (args.command as string) || "";
+const TOOL_META: Record<string, ToolMeta> = {
+  execute_sql: { language: "sql", label: "SQL", codeArg: "query" },
+  execute_python: { language: "python", label: "Python", codeArg: "code" },
+};
+
+function toolMeta(toolName: string): ToolMeta {
+  return TOOL_META[toolName] ?? DEFAULT_TOOL_META;
 }
 
 function formatResult(result: Record<string, unknown>): string {
@@ -43,7 +44,6 @@ function formatResult(result: Record<string, unknown>): string {
 }
 
 export default function CodeExecution({
-  callId,
   toolName,
   arguments: args,
   status,
@@ -52,29 +52,19 @@ export default function CodeExecution({
   duration,
 }: CodeExecutionProps) {
   const [expanded, setExpanded] = useState(status === "running");
-  const [elapsed, setElapsed] = useState(0);
-  const startTime = useRef(Date.now());
 
-  useEffect(() => {
-    if (status !== "running") return;
-    const interval = setInterval(() => {
-      setElapsed((Date.now() - startTime.current) / 1000);
-    }, 100);
-    return () => clearInterval(interval);
-  }, [status]);
-
+  // Collapse once the tool finishes (the live, expanded view is only useful
+  // while running).
   useEffect(() => {
     if (status !== "running") {
-      setElapsed((Date.now() - startTime.current) / 1000);
       setExpanded(false);
     }
   }, [status]);
 
-  const label = getLabel(toolName);
-  const language = getLanguage(toolName);
-  const code = getCode(toolName, args);
+  const { language, label, codeArg } = toolMeta(toolName);
+  const code = (args[codeArg] as string) || "";
 
-  const displayDuration = duration ?? elapsed;
+  const displayDuration = useElapsedSeconds(status === "running", duration);
 
   const statusLabel =
     status === "running"
@@ -87,6 +77,7 @@ export default function CodeExecution({
     <div className="mb-1">
       <button
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
         className="flex items-center gap-1.5 text-[13px] font-medium text-gray-400 hover:text-gray-300 transition-colors"
       >
         <span className="text-xs">{expanded ? "▾" : "▸"}</span>
@@ -110,14 +101,8 @@ export default function CodeExecution({
             </div>
             <SyntaxHighlighter
               language={language}
-              style={vscDarkPlus}
-              customStyle={{
-                margin: 0,
-                padding: "0.75rem",
-                fontSize: "0.8125rem",
-                background: "#1e1e3a",
-                borderRadius: "0.375rem",
-              }}
+              style={codeHighlighterStyle}
+              customStyle={codeHighlighterCustomStyle}
             >
               {code}
             </SyntaxHighlighter>

@@ -8,11 +8,13 @@ export interface SSEEvent {
   data: Record<string, unknown>;
 }
 
-export interface ChatMessage {
-  role: "user" | "agent";
-  content?: string;
-  steps?: Step[];
-}
+// Discriminated on `role`: a user message carries plain text; an agent
+// message carries the rendered turn steps and an optional interrupted flag.
+// Keeping these as separate variants lets the renderer drop non-null
+// assertions when reading `content`/`steps`.
+export type ChatMessage =
+  | { role: "user"; content: string }
+  | { role: "agent"; steps: Step[]; interrupted?: boolean };
 
 export interface TurnState {
   steps: Step[];
@@ -27,6 +29,7 @@ export interface ChatState {
 export type ChatAction =
   | { type: "USER_MESSAGE"; content: string }
   | { type: "AGENT_COMPLETE" }
+  | { type: "INTERRUPTED" }
   | { type: "CLEAR" }
   | { type: "THINKING_START"; timestamp?: string }
   | { type: "THINKING_DELTA"; delta: string }
@@ -61,6 +64,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (state.currentTurn.steps.length === 0) return state;
       return {
         messages: [...state.messages, { role: "agent", steps: [...state.currentTurn.steps] }],
+        currentTurn: { steps: [], thinkingCounter: 0 },
+      };
+    }
+
+    case "INTERRUPTED": {
+      // Fold the partial turn into history, marked interrupted. If nothing
+      // streamed yet there's nothing to show.
+      if (state.currentTurn.steps.length === 0) return state;
+      return {
+        messages: [...state.messages, { role: "agent", steps: [...state.currentTurn.steps], interrupted: true }],
         currentTurn: { steps: [], thinkingCounter: 0 },
       };
     }

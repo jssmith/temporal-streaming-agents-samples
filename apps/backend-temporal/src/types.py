@@ -1,7 +1,7 @@
 """Pydantic models for the analytics workflow contract."""
 
 from analytics_shared.types import ToolCallInfo
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from temporalio.contrib.workflow_streams import WorkflowStreamState
 
 __all__ = [
@@ -25,7 +25,7 @@ class WorkflowState(BaseModel):
     working_dir: str
     model: str = "gpt-5.4"
     reasoning_effort: str | None = "medium"
-    messages: list[dict] = []
+    messages: list[dict] = Field(default_factory=list)
     response_id: str | None = None
     db_schema: str | None = None
     stream_state: WorkflowStreamState | None = None
@@ -71,6 +71,9 @@ class ModelCallResult(BaseModel):
     tool_calls: list[ToolCallInfo]
     final_text: str | None = None
     usage: TokenUsage | None = None
+    # Set when the model call was interrupted mid-stream. final_text then
+    # holds whatever text had streamed so far so the workflow can persist it.
+    interrupted: bool = False
 
 
 class ToolInput(BaseModel):

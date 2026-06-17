@@ -1,6 +1,6 @@
 import { SSEEvent, ChatAction } from "./chatReducer";
 
-export type AppState = "idle" | "sending" | "running" | "error";
+export type AppState = "idle" | "sending" | "running" | "interrupting" | "error";
 
 /**
  * Maps an SSE event to reducer dispatch calls and app state changes.
@@ -21,6 +21,10 @@ export function processEvent(
       break;
     case "AGENT_COMPLETE":
       dispatch({ type: "AGENT_COMPLETE" });
+      setAppState("idle");
+      break;
+    case "INTERRUPTED":
+      dispatch({ type: "INTERRUPTED" });
       setAppState("idle");
       break;
     case "THINKING_START":

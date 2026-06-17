@@ -58,4 +58,3 @@ class TestSessionStore:
         session = create_session()
         assert session.messages == []
         assert session.response_id is None
-        assert session.sequence_number is None
