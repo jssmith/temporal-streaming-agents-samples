@@ -15,8 +15,8 @@ You need Python 3.12+, Node.js 18+, [`uv`](https://docs.astral.sh/uv/), the
 and an OpenAI API key.
 
 ```bash
-git clone https://github.com/jssmith/temporal-streaming-agents-samples
-cd temporal-streaming-agents-samples
+git clone https://github.com/jssmith/workflow-streams-demos
+cd workflow-streams-demos
 export OPENAI_API_KEY=sk-...
 scripts/run-demo.sh analytics
 ```
