@@ -1,4 +1,4 @@
-# Temporal Streaming Agents
+# Workflow Streams Demos
 
 Full-stack AI agent demos built on [Workflow Streams](https://docs.temporal.io/develop/python/libraries/workflow-streams),
 Temporal's durable streaming abstraction (public preview, ships in `temporalio>=1.27.0`).
